@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: vehicle-finance-app
+    env: python
+    plan: free
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+
+    envVars:
+      - key: DB_PATH
+        value: /data/database.db
+      - key: SECRET_KEY
+        generateValue: true
+
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
