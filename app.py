@@ -15,7 +15,8 @@ from dateutil.relativedelta import relativedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # ----------------- CONFIG -----------------
-DB = os.environ.get("DB_PATH", "database.db")
+DB = os.environ.get("DB_PATH", os.path.join("data", "database.db"))
+os.makedirs(os.path.dirname(DB), exist_ok=True)
 SECRET_KEY = os.environ.get("SECRET_KEY", "change_this_for_prod")
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", "backups"))
 BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "10"))
@@ -989,4 +990,5 @@ ADMIN_EXPORT_HTML = """
 
 # ----------------- run -----------------
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    #app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run()
