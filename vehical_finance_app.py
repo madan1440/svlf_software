@@ -1,21 +1,40 @@
 # app.py
 import os
+import shutil
 import sqlite3
 from datetime import datetime, date
-from flask import Flask, request, redirect, url_for, render_template_string
+from pathlib import Path
+from functools import wraps
+from flask import (
+    Flask, request, redirect, url_for, render_template_string, session,
+    send_from_directory, abort, flash
+)
 from dateutil.relativedelta import relativedelta
+from werkzeug.security import generate_password_hash, check_password_hash
+
+# ---------------- CONFIG ----------------
+DB = os.environ.get("DB_PATH", "database.db")
+SECRET_KEY = os.environ.get("SECRET_KEY", "change_this_for_prod")
+BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", "backups"))
+BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "10"))
+
+INITIAL_USERS = [
+    {"username": "9492126272", "password": "Madan@1440", "role": "admin", "name": "Admin One"},
+    {"username": "9490479284", "password": "Laxmi@6799", "role": "admin", "name": "Admin Two"},
+    {"username": "9492146644", "password": "Rupa@0642",  "role": "user",  "name": "User One"},
+    {"username": "9492948661", "password": "Venky@8661",  "role": "user",  "name": "User Two"},
+]
 
 app = Flask(__name__)
-DB = os.environ.get("DB_PATH", "database.db")
+app.secret_key = SECRET_KEY
 
-# ---------------- DB helpers ----------------
+# ---------------- DB helpers & init ----------------
 def get_db():
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
     return conn
 
-@app.before_first_request
-def init_db():
+def init_db_and_seed_users():
     conn = get_db()
     cur = conn.cursor()
 
@@ -69,15 +88,119 @@ def init_db():
         paid_date TEXT
     )""")
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE,
+        name TEXT,
+        password_hash TEXT,
+        role TEXT
+    )""")
+
     conn.commit()
+
+    # seed users if table empty
+    count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    if count == 0:
+        for u in INITIAL_USERS:
+            username = u["username"]
+            name = u.get("name", username)
+            role = u.get("role", "user")
+            phash = generate_password_hash(u["password"])
+            try:
+                conn.execute("INSERT INTO users (username,name,password_hash,role) VALUES (?,?,?,?)",
+                             (username, name, phash, role))
+            except sqlite3.IntegrityError:
+                pass
+        conn.commit()
+
     conn.close()
+
+# ensure DB file exists & initialize
+Path(DB).parent.mkdir(parents=True, exist_ok=True) if Path(DB).parent != Path('.') else None
+open(DB, "a").close()
+init_db_and_seed_users()
 
 # ---------------- utilities ----------------
 def add_months(orig_date: date, months: int) -> date:
     return orig_date + relativedelta(months=months)
 
-# ---------------- Routes ----------------
-@app.route("/", methods=["GET"])
+# ---------------- auth & decorators ----------------
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if "user_id" not in session:
+            return redirect(url_for("login", next=request.path))
+        return view(*args, **kwargs)
+    return wrapped
+
+def admin_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if "user_id" not in session:
+            return redirect(url_for("login", next=request.path))
+        if session.get("role") != "admin":
+            abort(403)
+        return view(*args, **kwargs)
+    return wrapped
+
+@app.context_processor
+def inject_user():
+    return {
+        "current_username": session.get("username"),
+        "current_role": session.get("role")
+    }
+
+# ---------------- backup helpers ----------------
+BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+def list_backups():
+    files = sorted(BACKUP_DIR.glob("db_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return files
+
+def create_backup():
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fname = f"db_{ts}.db"
+    dest = BACKUP_DIR / fname
+    shutil.copy2(DB, dest)
+    files = list_backups()
+    if len(files) > BACKUP_KEEP:
+        for p in files[BACKUP_KEEP:]:
+            try:
+                p.unlink()
+            except Exception:
+                pass
+    return dest
+
+# ---------------- auth routes ----------------
+@app.route("/login", methods=["GET","POST"])
+def login():
+    error = None
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        conn = get_db()
+        u = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        conn.close()
+        if not u or not check_password_hash(u["password_hash"], password):
+            error = "Invalid username or password"
+        else:
+            session["user_id"] = u["id"]
+            session["username"] = u["username"]
+            session["name"] = u["name"]
+            session["role"] = u["role"]
+            next_url = request.args.get("next") or url_for("dashboard")
+            return redirect(next_url)
+    return render_template_string(LOGIN_HTML, error=error)
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+# ---------------- main app routes ----------------
+@app.route("/")
+@login_required
 def dashboard():
     q = request.args.get("q", "").strip()
     vtype = request.args.get("type", "ALL")
@@ -105,7 +228,9 @@ def dashboard():
 
     return render_template_string(DASHBOARD_HTML, vehicles=vehicles, q=q, vtype=vtype, status=status, total=total, stock=stock, sold=sold)
 
+# Add vehicle (admin only) - Bike default selection
 @app.route("/add", methods=["GET","POST"])
+@admin_required
 def add_vehicle():
     if request.method == "POST":
         f = request.form
@@ -129,7 +254,9 @@ def add_vehicle():
         return redirect(url_for("dashboard"))
     return render_template_string(ADD_HTML)
 
+# Edit vehicle (admin only)
 @app.route("/edit/<int:vid>", methods=["GET","POST"])
+@admin_required
 def edit_vehicle(vid):
     conn = get_db()
     if request.method == "POST":
@@ -158,7 +285,24 @@ def edit_vehicle(vid):
         return redirect(url_for("dashboard"))
     return render_template_string(EDIT_HTML, v=v, s=s)
 
+# Delete vehicle (admin only)
+@app.route("/delete/<int:vid>", methods=["GET"])
+@admin_required
+def delete_vehicle(vid):
+    conn = get_db()
+    buyers = conn.execute("SELECT id FROM buyers WHERE vehicle_id=?", (vid,)).fetchall()
+    for b in buyers:
+        conn.execute("DELETE FROM emis WHERE buyer_id=?", (b["id"],))
+    conn.execute("DELETE FROM buyers WHERE vehicle_id=?", (vid,))
+    conn.execute("DELETE FROM sellers WHERE vehicle_id=?", (vid,))
+    conn.execute("DELETE FROM vehicles WHERE id=?", (vid,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for("dashboard"))
+
+# Sell vehicle (admin only)
 @app.route("/sell/<int:vid>", methods=["GET","POST"])
+@admin_required
 def sell_vehicle(vid):
     conn = get_db()
     v = conn.execute("SELECT * FROM vehicles WHERE id=?", (vid,)).fetchone()
@@ -198,9 +342,8 @@ def sell_vehicle(vid):
         buyer_id = cur.lastrowid
 
         sd = datetime.strptime(sale_date, "%Y-%m-%d").date()
-        # generate exactly 'tenure' EMIs, first due one month after sale_date
         for i in range(1, tenure + 1):
-            due = add_months(sd, i)  # i months after sale_date
+            due = add_months(sd, i)
             cur.execute("""
                 INSERT INTO emis (buyer_id, emi_no, due_date, amount, status)
                 VALUES (?, ?, ?, ?, 'Unpaid')
@@ -213,7 +356,9 @@ def sell_vehicle(vid):
     conn.close()
     return render_template_string(SELL_HTML, v=v, today=datetime.now().strftime("%Y-%m-%d"))
 
+# View (both roles)
 @app.route("/view/<int:vid>", methods=["GET"])
+@login_required
 def view_vehicle(vid):
     conn = get_db()
     v = conn.execute("SELECT * FROM vehicles WHERE id=?", (vid,)).fetchone()
@@ -227,15 +372,15 @@ def view_vehicle(vid):
         return redirect(url_for("dashboard"))
     return render_template_string(VIEW_HTML, v=v, s=s, b=b, emis=emis)
 
+# Edit buyer (admin only) — safe adjustments to EMIs
 @app.route("/buyer/<int:vid>", methods=["GET","POST"])
+@admin_required
 def edit_buyer(vid):
     conn = get_db()
     buyer = conn.execute("SELECT * FROM buyers WHERE vehicle_id=?", (vid,)).fetchone()
 
     if request.method == "POST":
         f = request.form
-
-        # parse and sanitize numeric inputs (integers)
         try:
             new_sale_value = int(float(f.get("sale_value") or 0))
         except:
@@ -253,9 +398,7 @@ def edit_buyer(vid):
         except:
             new_tenure = 0
 
-        # If there's no existing buyer row (unexpected), create one
         if not buyer:
-            # create buyer (use sale_date = today)
             sale_date = datetime.now().strftime("%Y-%m-%d")
             cur = conn.cursor()
             cur.execute("""
@@ -264,21 +407,15 @@ def edit_buyer(vid):
             """, (vid, f.get("buyer_name") or "", f.get("buyer_phone") or "", f.get("buyer_address") or "",
                   new_sale_value, new_finance_amount, new_tenure, new_emi_amount, sale_date))
             buyer_id = cur.lastrowid
-
-            # generate EMIs for tenure
             sd = datetime.strptime(sale_date, "%Y-%m-%d").date()
             for i in range(1, new_tenure + 1):
                 due = add_months(sd, i)
-                cur.execute("""
-                    INSERT INTO emis (buyer_id, emi_no, due_date, amount, status)
-                    VALUES (?, ?, ?, ?, 'Unpaid')
-                """, (buyer_id, i, due.isoformat(), new_emi_amount))
-
+                cur.execute("INSERT INTO emis (buyer_id, emi_no, due_date, amount, status) VALUES (?, ?, ?, ?, 'Unpaid')",
+                            (buyer_id, i, due.isoformat(), new_emi_amount))
             conn.commit()
             conn.close()
             return redirect(url_for("view_vehicle", vid=vid))
 
-        # If buyer exists: perform safe update + EMI adjustments
         buyer_id = buyer["id"]
         old_tenure = int(buyer["tenure"] or 0)
         old_emi_amount = int(buyer["emi_amount"] or 0)
@@ -286,7 +423,6 @@ def edit_buyer(vid):
         sale_date = datetime.strptime(sale_date_str, "%Y-%m-%d").date()
 
         cur = conn.cursor()
-        # update buyer main fields
         cur.execute("""
             UPDATE buyers SET buyer_name=?, buyer_phone=?, buyer_address=?,
                               sale_value=?, finance_amount=?, emi_amount=?, tenure=?
@@ -294,26 +430,16 @@ def edit_buyer(vid):
         """, (f.get("buyer_name") or "", f.get("buyer_phone") or "", f.get("buyer_address") or "",
               new_sale_value, new_finance_amount, new_emi_amount, new_tenure, vid))
 
-        # 1) If EMI amount changed: update unpaid EMIs to new amount
         if new_emi_amount != old_emi_amount:
-            cur.execute("""
-                UPDATE emis SET amount=? WHERE buyer_id=? AND status!='Paid'
-            """, (new_emi_amount, buyer_id))
+            cur.execute("UPDATE emis SET amount=? WHERE buyer_id=? AND status!='Paid'", (new_emi_amount, buyer_id))
 
-        # 2) If tenure increased -> add EMIs (emi_no from old_tenure+1 .. new_tenure)
         if new_tenure > old_tenure:
             for i in range(old_tenure + 1, new_tenure + 1):
                 due = add_months(sale_date, i)
-                cur.execute("""
-                    INSERT INTO emis (buyer_id, emi_no, due_date, amount, status)
-                    VALUES (?, ?, ?, ?, 'Unpaid')
-                """, (buyer_id, i, due.isoformat(), new_emi_amount))
-
-        # 3) If tenure decreased -> remove unpaid EMIs with emi_no > new_tenure
+                cur.execute("INSERT INTO emis (buyer_id, emi_no, due_date, amount, status) VALUES (?, ?, ?, ?, 'Unpaid')",
+                            (buyer_id, i, due.isoformat(), new_emi_amount))
         elif new_tenure < old_tenure:
-            cur.execute("""
-                DELETE FROM emis WHERE buyer_id=? AND emi_no>? AND status!='Paid'
-            """, (buyer_id, new_tenure))
+            cur.execute("DELETE FROM emis WHERE buyer_id=? AND emi_no>? AND status!='Paid'", (buyer_id, new_tenure))
 
         conn.commit()
         conn.close()
@@ -322,7 +448,9 @@ def edit_buyer(vid):
     conn.close()
     return render_template_string(EDIT_BUYER_HTML, buyer=buyer, vid=vid)
 
+# Toggle EMI paid/unpaid (admin only)
 @app.route("/emi/toggle/<int:emi_id>", methods=["POST"])
+@admin_required
 def toggle_emi(emi_id):
     action = request.form.get("action")
     conn = get_db()
@@ -335,26 +463,58 @@ def toggle_emi(emi_id):
     conn.close()
     return redirect(ref)
 
-@app.route("/delete/<int:vid>", methods=["GET"])
-def delete_vehicle(vid):
-    conn = get_db()
-    buyers = conn.execute("SELECT id FROM buyers WHERE vehicle_id=?", (vid,)).fetchall()
-    for b in buyers:
-        conn.execute("DELETE FROM emis WHERE buyer_id=?", (b["id"],))
-    conn.execute("DELETE FROM buyers WHERE vehicle_id=?", (vid,))
-    conn.execute("DELETE FROM sellers WHERE vehicle_id=?", (vid,))
-    conn.execute("DELETE FROM vehicles WHERE id=?", (vid,))
-    conn.commit()
-    conn.close()
-    return redirect(url_for("dashboard"))
+# Admin backups UI
+@app.route("/admin/backups", methods=["GET"])
+@admin_required
+def admin_backups():
+    files = list_backups()
+    files_info = [{"name": p.name, "mtime": datetime.fromtimestamp(p.stat().st_mtime).isoformat()} for p in files]
+    return render_template_string(ADMIN_BACKUPS_HTML, files=files_info)
 
-# ---------------- Templates (plain strings) ----------------
+@app.route("/admin/backups/create", methods=["POST"])
+@admin_required
+def admin_backup_create():
+    dest = create_backup()
+    flash(f"Backup created: {dest.name}")
+    return redirect(url_for("admin_backups"))
+
+@app.route("/admin/backups/download/<path:filename>", methods=["GET"])
+@admin_required
+def admin_backup_download(filename):
+    file_path = BACKUP_DIR / filename
+    if not file_path.exists():
+        abort(404)
+    return send_from_directory(BACKUP_DIR.resolve(), filename, as_attachment=True)
+
+@app.route("/admin/backups/delete/<path:filename>", methods=["POST"])
+@admin_required
+def admin_backup_delete(filename):
+    file_path = BACKUP_DIR / filename
+    if file_path.exists():
+        file_path.unlink()
+    return redirect(url_for("admin_backups"))
+
+# ---------------- Templates ----------------
+LOGIN_HTML = """
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Login</title>
+<style>body{font-family:Inter;padding:20px;background:#f1f5f9}form{max-width:420px;margin:40px auto;background:white;padding:20px;border-radius:8px}label{display:block;margin-top:8px}</style>
+</head><body>
+<form method="post">
+  <h2>Login</h2>
+  {% if error %}<div style="color:red">{{ error }}</div>{% endif %}
+  <label>Username (phone)</label><input name="username" required>
+  <label>Password</label><input name="password" type="password" required>
+  <div style="margin-top:12px"><button type="submit">Login</button></div>
+</form>
+</body></html>
+"""
+
 BASE_CSS = """
 <style>
 :root{--bg:#f4f6fb;--card:#fff;--muted:#6b7280;--primary:#2563eb;--danger:#ef4444}
 *{box-sizing:border-box;font-family:Inter,Arial,sans-serif}
 body{margin:0;background:var(--bg);color:#0f172a}
-header{background:linear-gradient(135deg,var(--primary),#1e40af);color:#fff;padding:14px 18px}
+header{background:linear-gradient(135deg,var(--primary),#1e40af);color:#fff;padding:12px 18px;position:relative}
 .container{max-width:1100px;margin:18px auto;padding:0 18px}
 .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center}
 .controls .left{flex:1;display:flex;gap:8px;align-items:center}
@@ -363,19 +523,14 @@ input,select,textarea{padding:10px;border-radius:8px;border:1px solid #e6eefc;ba
 .card{background:var(--card);border-radius:12px;padding:12px;box-shadow:0 8px 30px rgba(2,6,23,0.06);margin-bottom:12px}
 .table{width:100%;border-collapse:collapse;background:var(--card);border-radius:8px;overflow:hidden}
 th,td{padding:10px;border-bottom:1px solid #eef2ff;text-align:left}
-th{background:#f8fafc;color:var(--muted)}
 .badge{padding:6px 10px;border-radius:8px}
 .stock{background:#dcfce7;color:#166534}
 .sold{background:#fee2e2;color:#991b1b}
 .form-stack{display:flex;flex-direction:column;gap:10px}
 .small-btn{padding:6px 8px;border-radius:6px}
 .link{color:var(--primary);text-decoration:none}
-@media(max-width:780px){
-  .controls{flex-direction:column}
-  .controls .left{flex-direction:column;align-items:stretch}
-  th,td{display:block}
-  tr{margin-bottom:12px}
-}
+.top-right{position:absolute;right:18px;top:12px;color:white}
+@media(max-width:780px){ .controls{flex-direction:column} .controls .left{flex-direction:column;align-items:stretch} th,td{display:block} tr{margin-bottom:12px} }
 </style>
 """
 
@@ -383,7 +538,16 @@ DASHBOARD_HTML = """
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vehicle Finance</title>
 """ + BASE_CSS + """
 </head><body>
-<header><div style="max-width:1100px;margin:0 auto;padding:0 18px"><strong>Vehicle Finance Manager</strong></div></header>
+<header>
+  <div style="max-width:1100px;margin:0 auto;padding:0 18px">
+    <strong>Vehicle Finance</strong>
+    <span class="top-right">
+      {% if current_username %}
+        {{ current_username }} ({{ current_role }}) • <a href="{{ url_for('logout') }}" style="color:white">Logout</a>
+      {% endif %}
+    </span>
+  </div>
+</header>
 <div class="container">
   <div class="controls">
     <div class="left">
@@ -402,8 +566,11 @@ DASHBOARD_HTML = """
         <button class="btn" type="submit">Search</button>
       </form>
     </div>
+
     <div>
-      <a class="btn" href="/add">+ Add Vehicle</a>
+      {% if current_role == 'admin' %}
+        <a class="btn" href="{{ url_for('add_vehicle') }}">+ Add Vehicle</a>
+      {% endif %}
     </div>
   </div>
 
@@ -427,16 +594,25 @@ DASHBOARD_HTML = """
           <td><a href="{{ url_for('view_vehicle', vid=v.id) }}" class="link">{{ v.number }}</a></td>
           <td>{% if v.status=='Stock' %}<span class="badge stock">In Stock</span>{% else %}<span class="badge sold">Sold</span>{% endif %}</td>
           <td>
-            <a href="{{ url_for('view_vehicle', vid=v.id) }}">View</a> |
-            <a href="{{ url_for('edit_vehicle', vid=v.id) }}">Edit</a>
-            {% if v.status=='Stock' %}| <a href="{{ url_for('sell_vehicle', vid=v.id) }}">Sell</a>{% endif %}
-            | <a href="#" onclick="if(confirm('Delete vehicle and all related data?')) location.href='{{ url_for('delete_vehicle', vid=v.id) }}'">Delete</a>
+            <a href="{{ url_for('view_vehicle', vid=v.id) }}">View</a>
+            {% if current_role == 'admin' %}
+             | <a href="{{ url_for('edit_vehicle', vid=v.id) }}">Edit</a>
+             {% if v.status=='Stock' %} | <a href="{{ url_for('sell_vehicle', vid=v.id) }}">Sell</a>{% endif %}
+             | <a href="#" onclick="if(confirm('Delete vehicle and all related data?')) location.href='{{ url_for('delete_vehicle', vid=v.id) }}'">Delete</a>
+            {% endif %}
           </td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
   </div>
+
+  {% if current_role == 'admin' %}
+  <div class="card">
+    <h4>Admin Tools</h4>
+    <a class="btn" href="{{ url_for('admin_backups') }}">Backups</a>
+  </div>
+  {% endif %}
 
 </div></body></html>
 """
@@ -445,18 +621,21 @@ ADD_HTML = """
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Add Vehicle</title>
 """ + BASE_CSS + """
 </head><body>
-<header style="background:linear-gradient(135deg,var(--primary),#1e40af);color:white;padding:12px 18px">Add Vehicle</header>
+<header><div style="max-width:1100px;margin:0 auto;padding:0 18px"><strong>Vehicle Finance</strong></div></header>
 <div class="container">
   <div class="card">
     <a href="/">← Back to Dashboard</a>
     <form method="post" class="form-stack" style="margin-top:12px">
-      <label>Type</label><select name="type" required><option>Car</option><option>Bike</option></select>
+      <label>Type</label>
+      <select name="type" required>
+        <option value="Bike" selected>Bike</option>
+        <option value="Car">Car</option>
+      </select>
       <label>Vehicle Name</label><input name="name" required>
       <label>Brand</label><input name="brand">
       <label>Model</label><input name="model">
       <label>Color</label><input name="color">
       <label>Vehicle Number</label><input name="number" required>
-
       <hr>
       <h4>Seller Information</h4>
       <label>Seller Name</label><input name="seller_name" required>
@@ -465,7 +644,6 @@ ADD_HTML = """
       <label>Buy Value (integer)</label><input name="buy_value" type="number" step="1">
       <label>Buy Date</label><input name="buy_date" type="date">
       <label>Comments</label><textarea name="comments"></textarea>
-
       <div><button class="btn" type="submit">Save Vehicle</button></div>
     </form>
   </div>
@@ -477,22 +655,21 @@ EDIT_HTML = """
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Edit Vehicle</title>
 """ + BASE_CSS + """
 </head><body>
-<header style="background:linear-gradient(135deg,var(--primary),#1e40af);color:white;padding:12px 18px">Edit Vehicle</header>
+<header><div style="max-width:1100px;margin:0 auto;padding:0 18px"><strong>Vehicle Finance</strong></div></header>
 <div class="container">
   <div class="card">
-    <a href="{{ url_for('dashboard') }}">← Back to Dashboard</a>
+    <a href="/">← Back to Dashboard</a>
     <form method="post" class="form-stack" style="margin-top:12px">
       <label>Type</label>
       <select name="type" required>
-        <option {% if v.type=='Car' %}selected{% endif %}>Car</option>
-        <option {% if v.type=='Bike' %}selected{% endif %}>Bike</option>
+        <option value="Car" {% if v.type=='Car' %}selected{% endif %}>Car</option>
+        <option value="Bike" {% if v.type=='Bike' %}selected{% endif %}>Bike</option>
       </select>
       <label>Vehicle Name</label><input name="name" value="{{ v.name }}" required>
       <label>Brand</label><input name="brand" value="{{ v.brand }}">
       <label>Model</label><input name="model" value="{{ v.model }}">
       <label>Color</label><input name="color" value="{{ v.color }}">
       <label>Vehicle Number</label><input name="number" value="{{ v.number }}" required>
-
       <hr>
       <h4>Seller (update)</h4>
       <label>Seller Name</label><input name="seller_name" value="{{ s.seller_name if s else '' }}">
@@ -501,9 +678,8 @@ EDIT_HTML = """
       <label>Buy Value (integer)</label><input name="buy_value" type="number" step="1" value="{{ s.buy_value if s else '' }}">
       <label>Buy Date</label><input name="buy_date" type="date" value="{{ s.buy_date if s else '' }}">
       <label>Comments</label><textarea name="comments">{{ s.comments if s else '' }}</textarea>
-
       <div><button class="btn" type="submit">Update (go to Dashboard)</button>
-      <a href="{{ url_for('dashboard') }}" style="margin-left:12px">Cancel</a></div>
+      <a href="/" style="margin-left:12px">Cancel</a></div>
     </form>
   </div>
 </div>
@@ -514,7 +690,7 @@ SELL_HTML = """
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sell Vehicle</title>
 """ + BASE_CSS + """
 </head><body>
-<header style="background:linear-gradient(135deg,var(--primary),#1e40af);color:white;padding:12px 18px">Sell Vehicle</header>
+<header><div style="max-width:1100px;margin:0 auto;padding:0 18px"><strong>Vehicle Finance</strong></div></header>
 <div class="container">
   <div class="card">
     <a href="/">← Back to Dashboard</a>
@@ -540,7 +716,7 @@ VIEW_HTML = """
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vehicle Details</title>
 """ + BASE_CSS + """
 </head><body>
-<header style="background:linear-gradient(135deg,var(--primary),#1e40af);color:white;padding:12px 18px">Vehicle Details</header>
+<header><div style="max-width:1100px;margin:0 auto;padding:0 18px"><strong>Vehicle Finance</strong></div></header>
 <div class="container">
   <div class="card">
     <a href="/">← Back to Dashboard</a>
@@ -582,26 +758,36 @@ VIEW_HTML = """
             <td>₹{{ e.amount }}</td>
             <td>{{ e.status }}</td>
             <td>
-              <form method="post" action="{{ url_for('toggle_emi', emi_id=e.id) }}" style="display:inline">
-                <input type="hidden" name="ref" value="{{ url_for('view_vehicle', vid=v.id) }}">
-                {% if e.status != 'Paid' %}
-                  <button class="small-btn btn" name="action" value="mark_paid" onclick="return confirm('Mark EMI #{{ e.emi_no }} as PAID?')">Mark Paid</button>
-                {% else %}
-                  <button class="small-btn" style="background:#ef4444;color:#fff;border:none;border-radius:6px;padding:8px" name="action" value="mark_unpaid" onclick="return confirm('Mark EMI #{{ e.emi_no }} as UNPAID?')">Mark Unpaid</button>
-                {% endif %}
-              </form>
+              {% if current_role == 'admin' %}
+                <form method="post" action="{{ url_for('toggle_emi', emi_id=e.id) }}" style="display:inline">
+                  <input type="hidden" name="ref" value="{{ url_for('view_vehicle', vid=v.id) }}">
+                  {% if e.status != 'Paid' %}
+                    <button class="small-btn btn" name="action" value="mark_paid" onclick="return confirm('Mark EMI #{{ e.emi_no }} as PAID?')">Mark Paid</button>
+                  {% else %}
+                    <button class="small-btn" style="background:#ef4444;color:#fff;border:none;border-radius:6px;padding:8px" name="action" value="mark_unpaid" onclick="return confirm('Mark EMI #{{ e.emi_no }} as UNPAID?')">Mark Unpaid</button>
+                  {% endif %}
+                </form>
+              {% else %}
+                -
+              {% endif %}
             </td>
           </tr>
         {% endfor %}
         </tbody>
       </table>
 
-    <div style="margin-top:10px"><a class="btn" href="{{ url_for('edit_buyer', vid=v.id) }}">Edit Buyer</a></div>
+    <div style="margin-top:10px">
+      {% if current_role == 'admin' %}
+        <a class="btn" href="{{ url_for('edit_buyer', vid=v.id) }}">Edit Buyer</a>
+      {% endif %}
+    </div>
   </div>
   {% else %}
   <div class="card">
     <h3>No buyer recorded</h3>
-    <a class="btn" href="{{ url_for('sell_vehicle', vid=v.id) }}">Sell this vehicle</a>
+    {% if current_role == 'admin' %}
+      <a class="btn" href="{{ url_for('sell_vehicle', vid=v.id) }}">Sell this vehicle</a>
+    {% endif %}
   </div>
   {% endif %}
 
@@ -613,7 +799,7 @@ EDIT_BUYER_HTML = """
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Edit Buyer</title>
 """ + BASE_CSS + """
 </head><body>
-<header style="background:linear-gradient(135deg,var(--primary),#1e40af);color:white;padding:12px 18px">Edit Buyer</header>
+<header><div style="max-width:1100px;margin:0 auto;padding:0 18px"><strong>Vehicle Finance</strong></div></header>
 <div class="container">
   <div class="card">
     <a href="{{ url_for('view_vehicle', vid=vid) }}">← Back to Details</a>
@@ -632,8 +818,32 @@ EDIT_BUYER_HTML = """
 </body></html>
 """
 
+ADMIN_BACKUPS_HTML = """
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Backups</title>
+""" + BASE_CSS + """
+</head><body>
+<header><div style="max-width:1100px;margin:0 auto;padding:0 18px"><strong>Backups</strong><span style="float:right"><a href="/">Back</a></span></div></header>
+<div class="container">
+  <div class="card">
+    <form method="post" action="{{ url_for('admin_backup_create') }}">
+      <button class="btn" type="submit">Create Backup Now</button>
+    </form>
+    <hr>
+    <h4>Backups</h4>
+    <ul>
+    {% for f in files %}
+      <li>{{ f.name }} ({{ f.mtime }})
+        - <a href="{{ url_for('admin_backup_download', filename=f.name) }}">Download</a>
+        - <form method="post" action="{{ url_for('admin_backup_delete', filename=f.name) }}" style="display:inline"><button type="submit">Delete</button></form>
+      </li>
+    {% endfor %}
+    </ul>
+  </div>
+</div>
+</body></html>
+"""
+
 # ---------------- Run ----------------
 if __name__ == "__main__":
-    open(DB, "a").close()
-    print("Starting app with DB:", DB)
-    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    #app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run()
