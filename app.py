@@ -14,9 +14,10 @@ from flask import (
 from dateutil.relativedelta import relativedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# ----------------- CONFIG -----------------
-DB = os.environ.get("DB_PATH", os.path.join("data", "database.db"))
-os.makedirs(os.path.dirname(DB), exist_ok=True)
+# # ----------------- CONFIG -----------------
+# DB = os.environ.get("DB_PATH", os.path.join("data", "database.db"))
+# os.makedirs(os.path.dirname(DB), exist_ok=True)
+DB = os.environ.get("DB_PATH",  "database.db")
 SECRET_KEY = os.environ.get("SECRET_KEY", "change_this_for_prod")
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", "backups"))
 BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "10"))
