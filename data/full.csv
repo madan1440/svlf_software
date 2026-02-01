@@ -1,0 +1,4 @@
+vehicle_id,type,name,brand,model,color,number,status,seller_name,seller_phone,seller_city,buy_value,buy_date,comments,buyer_id,record_no,buyer_name,buyer_phone,buyer_address,sale_value,finance_amount,emi_amount,tenure,sale_date
+1,Bike,access 125,suzuki,2017,gray ,AP36AD8682,Sold,CHINNI,09490479287,APPANAPALLI,100000,2026-01-27,,1,1,madan,9492142435,,120000,20000,5000,6,2026-01-29
+2,Bike,access 125,suzuki,2015,gray ,AP36AD8689,Stock,CHINNI,09490479287,APPANAPALLI,100000,,,,,,,,,,,,
+3,Bike,access 125,suzuki,2018,gray ,AP36AD8656,Stock,CHINNI,09490479287,APPANAPALLI,100000,2026-01-21,,,,,,,,,,,
