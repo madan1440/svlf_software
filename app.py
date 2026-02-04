@@ -1,9 +1,8 @@
 # app.py
 import os
-import shutil
-import sqlite3
 import csv
 import io
+import zipfile
 from datetime import datetime, date
 from pathlib import Path
 from functools import wraps
@@ -15,9 +14,10 @@ from dateutil.relativedelta import relativedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # # ----------------- CONFIG -----------------
-# DB = os.environ.get("DB_PATH", os.path.join("data", "database.db"))
-# os.makedirs(os.path.dirname(DB), exist_ok=True)
-DB = os.environ.get("DB_PATH",  "database.db")
+FULL_CSV = os.environ.get("FULL_CSV_PATH", "full.csv")
+EMI_CSV = os.environ.get("EMI_CSV_PATH", "emi.csv")
+USERS_CSV = os.environ.get("USERS_CSV_PATH", "users.csv")
+AUDIT_CSV = os.environ.get("AUDIT_CSV_PATH", "audit_log.csv")
 SECRET_KEY = os.environ.get("SECRET_KEY", "change_this_for_prod")
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", "backups"))
 BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "10"))
@@ -32,108 +32,158 @@ INITIAL_USERS = [
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
-# ----------------- DB helpers & init -----------------
-def get_db():
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    return conn
+# ----------------- CSV helpers & init -----------------
+FULL_FIELDS = [
+    "vehicle_id", "type", "name", "brand", "model", "color", "number", "status",
+    "seller_name", "seller_phone", "seller_city", "buy_value", "buy_date", "comments",
+    "buyer_id", "record_no", "buyer_name", "buyer_phone", "buyer_address", "sale_value",
+    "finance_amount", "emi_amount", "tenure", "sale_date",
+]
+EMI_FIELDS = ["id", "buyer_id", "emi_no", "due_date", "amount", "status", "paid_date"]
+USER_FIELDS = ["id", "username", "name", "password_hash", "role"]
+AUDIT_FIELDS = ["id", "who", "action", "target", "ts"]
 
-def init_db_and_seed_users():
-    conn = get_db()
-    cur = conn.cursor()
+def ensure_csv(path, fieldnames):
+    path_obj = Path(path)
+    if not path_obj.exists() or path_obj.stat().st_size == 0:
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+        with path_obj.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS vehicles (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        type TEXT,
-        name TEXT,
-        brand TEXT,
-        model TEXT,
-        color TEXT,
-        number TEXT UNIQUE,
-        status TEXT
-    )""")
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS sellers (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        vehicle_id INTEGER,
-        seller_name TEXT,
-        seller_phone TEXT,
-        seller_city TEXT,
-        buy_value INTEGER,
-        buy_date TEXT,
-        comments TEXT
-    )""")
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS buyers (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        vehicle_id INTEGER,
-        record_no TEXT,
-        buyer_name TEXT,
-        buyer_phone TEXT,
-        buyer_address TEXT,
-        sale_value INTEGER,
-        finance_amount INTEGER,
-        emi_amount INTEGER,
-        tenure INTEGER,
-        sale_date TEXT
-    )""")
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS emis (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyer_id INTEGER,
-        emi_no INTEGER,
-        due_date TEXT,
-        amount INTEGER,
-        status TEXT DEFAULT 'Unpaid',
-        paid_date TEXT
-    )""")
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        name TEXT,
-        password_hash TEXT,
-        role TEXT
-    )""")
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS audit_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        who TEXT,
-        action TEXT,
-        target TEXT,
-        ts TEXT
-    )""")
-    conn.commit()
+def read_csv_rows(path, fieldnames):
+    ensure_csv(path, fieldnames)
+    rows = []
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append({key: row.get(key, "") for key in fieldnames})
+    return rows
 
-    # seed initial users only if table empty
-    count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    if count == 0:
-        for u in INITIAL_USERS:
-            try:
-                conn.execute("INSERT INTO users (username,name,password_hash,role) VALUES (?,?,?,?)",
-                             (u["username"], u.get("name", u["username"]),
-                              generate_password_hash(u["password"]), u.get("role", "user")))
-            except sqlite3.IntegrityError:
-                pass
-        conn.commit()
-    conn.close()
+def write_csv_rows(path, fieldnames, rows):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
 
-Path(DB).parent.mkdir(parents=True, exist_ok=True) if Path(DB).parent != Path('.') else None
-open(DB, "a").close()
-init_db_and_seed_users()
+def load_full_rows():
+    return read_csv_rows(FULL_CSV, FULL_FIELDS)
+
+def save_full_rows(rows):
+    write_csv_rows(FULL_CSV, FULL_FIELDS, rows)
+
+def load_emi_rows():
+    return read_csv_rows(EMI_CSV, EMI_FIELDS)
+
+def save_emi_rows(rows):
+    write_csv_rows(EMI_CSV, EMI_FIELDS, rows)
+
+def load_users():
+    return read_csv_rows(USERS_CSV, USER_FIELDS)
+
+def save_users(rows):
+    write_csv_rows(USERS_CSV, USER_FIELDS, rows)
+
+def load_audit_rows():
+    return read_csv_rows(AUDIT_CSV, AUDIT_FIELDS)
+
+def save_audit_rows(rows):
+    write_csv_rows(AUDIT_CSV, AUDIT_FIELDS, rows)
+
+def next_id(rows, key):
+    max_id = 0
+    for row in rows:
+        try:
+            max_id = max(max_id, int(row.get(key) or 0))
+        except ValueError:
+            continue
+    return max_id + 1
+
+def to_int(value, default=0):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+def seed_initial_users():
+    users = load_users()
+    if users:
+        return
+    for u in INITIAL_USERS:
+        users.append({
+            "id": str(next_id(users, "id")),
+            "username": u["username"],
+            "name": u.get("name", u["username"]),
+            "password_hash": generate_password_hash(u["password"]),
+            "role": u.get("role", "user"),
+        })
+    save_users(users)
+
+seed_initial_users()
 
 # ----------------- utilities -----------------
 def add_months(orig_date: date, months: int) -> date:
     return orig_date + relativedelta(months=months)
 
+def vehicle_row_from_full(row):
+    vehicle = dict(row)
+    vehicle["id"] = to_int(row.get("vehicle_id") or 0)
+    return vehicle
+
+def seller_from_full(row):
+    if not row:
+        return None
+    return {
+        "id": to_int(row.get("vehicle_id") or 0),
+        "vehicle_id": to_int(row.get("vehicle_id") or 0),
+        "seller_name": row.get("seller_name", ""),
+        "seller_phone": row.get("seller_phone", ""),
+        "seller_city": row.get("seller_city", ""),
+        "buy_value": row.get("buy_value", ""),
+        "buy_date": row.get("buy_date", ""),
+        "comments": row.get("comments", ""),
+    }
+
+def buyer_from_full(row):
+    buyer_id = row.get("buyer_id") if row else ""
+    if not buyer_id:
+        return None
+    return {
+        "id": to_int(buyer_id),
+        "vehicle_id": to_int(row.get("vehicle_id") or 0),
+        "record_no": row.get("record_no", ""),
+        "buyer_name": row.get("buyer_name", ""),
+        "buyer_phone": row.get("buyer_phone", ""),
+        "buyer_address": row.get("buyer_address", ""),
+        "sale_value": row.get("sale_value", ""),
+        "finance_amount": row.get("finance_amount", ""),
+        "emi_amount": row.get("emi_amount", ""),
+        "tenure": row.get("tenure", ""),
+        "sale_date": row.get("sale_date", ""),
+    }
+
+def emis_for_buyer(buyer_id):
+    rows = load_emi_rows()
+    filtered = [row for row in rows if str(row.get("buyer_id")) == str(buyer_id)]
+    for row in filtered:
+        row["id"] = to_int(row.get("id") or 0)
+        row["emi_no"] = to_int(row.get("emi_no") or 0)
+    filtered.sort(key=lambda r: r.get("emi_no") or 0)
+    return filtered
+
 def log_action(who, action, target=""):
     try:
-        conn = get_db()
-        conn.execute("INSERT INTO audit_log (who, action, target, ts) VALUES (?, ?, ?, ?)",
-                     (who or "", action, target, datetime.now().isoformat()))
-        conn.commit()
-        conn.close()
+        rows = load_audit_rows()
+        rows.append({
+            "id": str(next_id(rows, "id")),
+            "who": who or "",
+            "action": action,
+            "target": target,
+            "ts": datetime.now().isoformat(),
+        })
+        save_audit_rows(rows)
     except Exception:
         pass
 
@@ -166,13 +216,17 @@ def inject_user():
 # ----------------- backups -----------------
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 def list_backups():
-    files = sorted(BACKUP_DIR.glob("db_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    files = sorted(BACKUP_DIR.glob("data_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
     return files
 def create_backup():
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fname = f"db_{ts}.db"
+    fname = f"data_{ts}.zip"
     dest = BACKUP_DIR / fname
-    shutil.copy2(DB, dest)
+    files_to_backup = [FULL_CSV, EMI_CSV, USERS_CSV, AUDIT_CSV]
+    with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in files_to_backup:
+            if Path(path).exists():
+                zf.write(path, arcname=Path(path).name)
     files = list_backups()
     if len(files) > BACKUP_KEEP:
         for p in files[BACKUP_KEEP:]:
@@ -190,16 +244,15 @@ def login():
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
-        conn = get_db()
-        u = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-        conn.close()
-        if not u or not check_password_hash(u["password_hash"], password):
+        users = load_users()
+        u = next((user for user in users if user.get("username") == username), None)
+        if not u or not check_password_hash(u.get("password_hash", ""), password):
             error = "Invalid username or password"
         else:
-            session["user_id"] = u["id"]
-            session["username"] = u["username"]
-            session["name"] = u["name"]
-            session["role"] = u["role"]
+            session["user_id"] = int(u.get("id") or 0)
+            session["username"] = u.get("username")
+            session["name"] = u.get("name")
+            session["role"] = u.get("role")
             log_action(u["username"], "login", "")
             return redirect(request.args.get("next") or url_for("dashboard"))
     return render_template_string(LOGIN_HTML, error=error)
@@ -219,25 +272,27 @@ def dashboard():
     vtype = request.args.get("type", "ALL")
     status = request.args.get("status", "ALL")
 
-    sql = "SELECT * FROM vehicles WHERE 1=1"
-    params = []
-    if vtype and vtype != "ALL":
-        sql += " AND type = ?"
-        params.append(vtype)
-    if status and status != "ALL":
-        sql += " AND status = ?"
-        params.append(status)
-    if q:
-        sql += " AND (name LIKE ? OR brand LIKE ? OR model LIKE ? OR number LIKE ?)"
-        like = f"%{q}%"
-        params += [like, like, like, like]
-
-    conn = get_db()
-    vehicles = conn.execute(sql, params).fetchall()
-    total = conn.execute("SELECT COUNT(*) FROM vehicles").fetchone()[0]
-    stock = conn.execute("SELECT COUNT(*) FROM vehicles WHERE status='Stock'").fetchone()[0]
-    sold = conn.execute("SELECT COUNT(*) FROM vehicles WHERE status='Sold'").fetchone()[0]
-    conn.close()
+    rows = load_full_rows()
+    vehicles = []
+    q_lower = q.lower()
+    for row in rows:
+        if vtype and vtype != "ALL" and row.get("type") != vtype:
+            continue
+        if status and status != "ALL" and row.get("status") != status:
+            continue
+        if q:
+            haystack = " ".join([
+                row.get("name", ""),
+                row.get("brand", ""),
+                row.get("model", ""),
+                row.get("number", ""),
+            ]).lower()
+            if q_lower not in haystack:
+                continue
+        vehicles.append(vehicle_row_from_full(row))
+    total = len(rows)
+    stock = sum(1 for row in rows if row.get("status") == "Stock")
+    sold = sum(1 for row in rows if row.get("status") == "Sold")
     return render_template_string(DASHBOARD_HTML, vehicles=vehicles, q=q, vtype=vtype, status=status, total=total, stock=stock, sold=sold)
 
 # Add vehicle (admin only) — Bike default
@@ -246,23 +301,39 @@ def dashboard():
 def add_vehicle():
     if request.method == "POST":
         f = request.form
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO vehicles (type, name, brand, model, color, number, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'Stock')
-        """, (f.get("type"), f.get("name"), f.get("brand"), f.get("model"), f.get("color"), f.get("number")))
-        vid = cur.lastrowid
         try:
             buy_val = int(float(f.get("buy_value") or 0))
         except:
             buy_val = 0
-        cur.execute("""
-            INSERT INTO sellers (vehicle_id, seller_name, seller_phone, seller_city, buy_value, buy_date, comments)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (vid, f.get("seller_name"), f.get("seller_phone"), f.get("seller_city"), buy_val, f.get("buy_date") or "", f.get("comments") or ""))
-        conn.commit()
-        conn.close()
+        rows = load_full_rows()
+        vid = next_id(rows, "vehicle_id")
+        rows.append({
+            "vehicle_id": str(vid),
+            "type": f.get("type"),
+            "name": f.get("name"),
+            "brand": f.get("brand"),
+            "model": f.get("model"),
+            "color": f.get("color"),
+            "number": f.get("number"),
+            "status": "Stock",
+            "seller_name": f.get("seller_name"),
+            "seller_phone": f.get("seller_phone"),
+            "seller_city": f.get("seller_city"),
+            "buy_value": str(buy_val),
+            "buy_date": f.get("buy_date") or "",
+            "comments": f.get("comments") or "",
+            "buyer_id": "",
+            "record_no": "",
+            "buyer_name": "",
+            "buyer_phone": "",
+            "buyer_address": "",
+            "sale_value": "",
+            "finance_amount": "",
+            "emi_amount": "",
+            "tenure": "",
+            "sale_date": "",
+        })
+        save_full_rows(rows)
         log_action(session.get("username"), "add_vehicle", f.get("number"))
         return redirect(url_for("dashboard"))
     return render_template_string(ADD_HTML)
@@ -271,30 +342,36 @@ def add_vehicle():
 @app.route("/edit/<int:vid>", methods=["GET","POST"])
 @admin_required
 def edit_vehicle(vid):
-    conn = get_db()
+    rows = load_full_rows()
     if request.method == "POST":
         f = request.form
-        conn.execute("""
-            UPDATE vehicles SET type=?, name=?, brand=?, model=?, color=?, number=?
-            WHERE id=?
-        """, (f.get("type"), f.get("name"), f.get("brand"), f.get("model"), f.get("color"), f.get("number"), vid))
-        seller = conn.execute("SELECT * FROM sellers WHERE vehicle_id=?", (vid,)).fetchone()
-        if seller:
-            try:
-                buy_val = int(float(f.get("buy_value") or 0))
-            except:
-                buy_val = 0
-            conn.execute("""
-                UPDATE sellers SET seller_name=?, seller_phone=?, seller_city=?, buy_value=?, buy_date=?, comments=?
-                WHERE vehicle_id=?
-            """, (f.get("seller_name"), f.get("seller_phone"), f.get("seller_city"), buy_val, f.get("buy_date") or "", f.get("comments") or "", vid))
-        conn.commit()
-        conn.close()
+        try:
+            buy_val = int(float(f.get("buy_value") or 0))
+        except:
+            buy_val = 0
+        for row in rows:
+            if to_int(row.get("vehicle_id") or 0) == vid:
+                row.update({
+                    "type": f.get("type"),
+                    "name": f.get("name"),
+                    "brand": f.get("brand"),
+                    "model": f.get("model"),
+                    "color": f.get("color"),
+                    "number": f.get("number"),
+                    "seller_name": f.get("seller_name"),
+                    "seller_phone": f.get("seller_phone"),
+                    "seller_city": f.get("seller_city"),
+                    "buy_value": str(buy_val),
+                    "buy_date": f.get("buy_date") or "",
+                    "comments": f.get("comments") or "",
+                })
+                break
+        save_full_rows(rows)
         log_action(session.get("username"), "edit_vehicle", str(vid))
         return redirect(url_for("dashboard"))
-    v = conn.execute("SELECT * FROM vehicles WHERE id=?", (vid,)).fetchone()
-    s = conn.execute("SELECT * FROM sellers WHERE vehicle_id=?", (vid,)).fetchone()
-    conn.close()
+    row = next((r for r in rows if to_int(r.get("vehicle_id") or 0) == vid), None)
+    v = vehicle_row_from_full(row) if row else None
+    s = seller_from_full(row) if row else None
     if not v:
         return redirect(url_for("dashboard"))
     return render_template_string(EDIT_HTML, v=v, s=s)
@@ -303,15 +380,14 @@ def edit_vehicle(vid):
 @app.route("/delete/<int:vid>", methods=["GET"])
 @admin_required
 def delete_vehicle(vid):
-    conn = get_db()
-    buyers = conn.execute("SELECT id FROM buyers WHERE vehicle_id=?", (vid,)).fetchall()
-    for b in buyers:
-        conn.execute("DELETE FROM emis WHERE buyer_id=?", (b["id"],))
-    conn.execute("DELETE FROM buyers WHERE vehicle_id=?", (vid,))
-    conn.execute("DELETE FROM sellers WHERE vehicle_id=?", (vid,))
-    conn.execute("DELETE FROM vehicles WHERE id=?", (vid,))
-    conn.commit()
-    conn.close()
+    rows = load_full_rows()
+    buyer_ids = [row.get("buyer_id") for row in rows if to_int(row.get("vehicle_id") or 0) == vid and row.get("buyer_id")]
+    rows = [row for row in rows if to_int(row.get("vehicle_id") or 0) != vid]
+    save_full_rows(rows)
+    if buyer_ids:
+        emis = load_emi_rows()
+        emis = [row for row in emis if str(row.get("buyer_id")) not in {str(bid) for bid in buyer_ids}]
+        save_emi_rows(emis)
     log_action(session.get("username"), "delete_vehicle", str(vid))
     return redirect(url_for("dashboard"))
 
@@ -319,10 +395,10 @@ def delete_vehicle(vid):
 @app.route("/sell/<int:vid>", methods=["GET","POST"])
 @admin_required
 def sell_vehicle(vid):
-    conn = get_db()
-    v = conn.execute("SELECT * FROM vehicles WHERE id=?", (vid,)).fetchone()
+    rows = load_full_rows()
+    row = next((r for r in rows if to_int(r.get("vehicle_id") or 0) == vid), None)
+    v = vehicle_row_from_full(row) if row else None
     if not v:
-        conn.close()
         return redirect(url_for("dashboard"))
 
     if request.method == "POST":
@@ -345,41 +421,54 @@ def sell_vehicle(vid):
             tenure = 0
 
         sale_date = f.get("sale_date") or datetime.now().strftime("%Y-%m-%d")
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO buyers (vehicle_id, record_no, buyer_name, buyer_phone, buyer_address,
-            sale_value, finance_amount, emi_amount, tenure, sale_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (vid, f.get("record_no") or "", f.get("buyer_name"), f.get("buyer_phone"), f.get("buyer_address"),
-              sale_value, finance_amount, emi_amount, tenure, sale_date))
-        buyer_id = cur.lastrowid
+        buyer_id = next_id(rows, "buyer_id")
+        for current in rows:
+            if to_int(current.get("vehicle_id") or 0) == vid:
+                current.update({
+                    "record_no": f.get("record_no") or "",
+                    "buyer_name": f.get("buyer_name"),
+                    "buyer_phone": f.get("buyer_phone"),
+                    "buyer_address": f.get("buyer_address"),
+                    "sale_value": str(sale_value),
+                    "finance_amount": str(finance_amount),
+                    "emi_amount": str(emi_amount),
+                    "tenure": str(tenure),
+                    "sale_date": sale_date,
+                    "buyer_id": str(buyer_id),
+                    "status": "Sold",
+                })
+                break
 
         sd = datetime.strptime(sale_date, "%Y-%m-%d").date()
+        emis_rows = load_emi_rows()
         for i in range(1, tenure + 1):
             due = add_months(sd, i)
-            cur.execute("INSERT INTO emis (buyer_id, emi_no, due_date, amount, status) VALUES (?, ?, ?, ?, 'Unpaid')",
-                        (buyer_id, i, due.isoformat(), emi_amount))
+            emis_rows.append({
+                "id": str(next_id(emis_rows, "id")),
+                "buyer_id": str(buyer_id),
+                "emi_no": str(i),
+                "due_date": due.isoformat(),
+                "amount": str(emi_amount),
+                "status": "Unpaid",
+                "paid_date": "",
+            })
 
-        conn.execute("UPDATE vehicles SET status='Sold' WHERE id=?", (vid,))
-        conn.commit()
-        conn.close()
+        save_full_rows(rows)
+        save_emi_rows(emis_rows)
         log_action(session.get("username"), "sell_vehicle", f"vehicle:{vid} buyer:{buyer_id}")
         return redirect(url_for("view_vehicle", vid=vid))
-    conn.close()
     return render_template_string(SELL_HTML, v=v, today=datetime.now().strftime("%Y-%m-%d"))
 
 # View (both roles)
 @app.route("/view/<int:vid>", methods=["GET"])
 @login_required
 def view_vehicle(vid):
-    conn = get_db()
-    v = conn.execute("SELECT * FROM vehicles WHERE id=?", (vid,)).fetchone()
-    s = conn.execute("SELECT * FROM sellers WHERE vehicle_id=?", (vid,)).fetchone()
-    b = conn.execute("SELECT * FROM buyers WHERE vehicle_id=?", (vid,)).fetchone()
-    emis = []
-    if b:
-        emis = conn.execute("SELECT * FROM emis WHERE buyer_id=? ORDER BY emi_no", (b["id"],)).fetchall()
-    conn.close()
+    rows = load_full_rows()
+    row = next((r for r in rows if to_int(r.get("vehicle_id") or 0) == vid), None)
+    v = vehicle_row_from_full(row) if row else None
+    s = seller_from_full(row) if row else None
+    b = buyer_from_full(row) if row else None
+    emis = emis_for_buyer(b["id"]) if b else []
     if not v:
         return redirect(url_for("dashboard"))
     return render_template_string(VIEW_HTML, v=v, s=s, b=b, emis=emis)
@@ -388,8 +477,9 @@ def view_vehicle(vid):
 @app.route("/buyer/<int:vid>", methods=["GET","POST"])
 @admin_required
 def edit_buyer(vid):
-    conn = get_db()
-    buyer = conn.execute("SELECT * FROM buyers WHERE vehicle_id=?", (vid,)).fetchone()
+    rows = load_full_rows()
+    row = next((r for r in rows if to_int(r.get("vehicle_id") or 0) == vid), None)
+    buyer = buyer_from_full(row) if row else None
 
     if request.method == "POST":
         f = request.form
@@ -412,20 +502,34 @@ def edit_buyer(vid):
 
         if not buyer:
             sale_date = datetime.now().strftime("%Y-%m-%d")
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO buyers (vehicle_id, buyer_name, buyer_phone, buyer_address, sale_value, finance_amount, tenure, emi_amount, sale_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (vid, f.get("buyer_name") or "", f.get("buyer_phone") or "", f.get("buyer_address") or "",
-                  new_sale_value, new_finance_amount, new_tenure, new_emi_amount, sale_date))
-            buyer_id = cur.lastrowid
+            buyer_id = next_id(rows, "buyer_id")
+            if row:
+                row.update({
+                    "buyer_id": str(buyer_id),
+                    "buyer_name": f.get("buyer_name") or "",
+                    "buyer_phone": f.get("buyer_phone") or "",
+                    "buyer_address": f.get("buyer_address") or "",
+                    "sale_value": str(new_sale_value),
+                    "finance_amount": str(new_finance_amount),
+                    "tenure": str(new_tenure),
+                    "emi_amount": str(new_emi_amount),
+                    "sale_date": sale_date,
+                })
             sd = datetime.strptime(sale_date, "%Y-%m-%d").date()
+            emis_rows = load_emi_rows()
             for i in range(1, new_tenure + 1):
                 due = add_months(sd, i)
-                cur.execute("INSERT INTO emis (buyer_id, emi_no, due_date, amount, status) VALUES (?, ?, ?, ?, 'Unpaid')",
-                            (buyer_id, i, due.isoformat(), new_emi_amount))
-            conn.commit()
-            conn.close()
+                emis_rows.append({
+                    "id": str(next_id(emis_rows, "id")),
+                    "buyer_id": str(buyer_id),
+                    "emi_no": str(i),
+                    "due_date": due.isoformat(),
+                    "amount": str(new_emi_amount),
+                    "status": "Unpaid",
+                    "paid_date": "",
+                })
+            save_full_rows(rows)
+            save_emi_rows(emis_rows)
             log_action(session.get("username"), "create_buyer", f"vehicle:{vid} buyer:{buyer_id}")
             return redirect(url_for("view_vehicle", vid=vid))
 
@@ -435,31 +539,48 @@ def edit_buyer(vid):
         sale_date_str = buyer["sale_date"] or datetime.now().strftime("%Y-%m-%d")
         sale_date = datetime.strptime(sale_date_str, "%Y-%m-%d").date()
 
-        cur = conn.cursor()
-        cur.execute("""
-            UPDATE buyers SET buyer_name=?, buyer_phone=?, buyer_address=?,
-                              sale_value=?, finance_amount=?, emi_amount=?, tenure=?
-            WHERE vehicle_id=?
-        """, (f.get("buyer_name") or "", f.get("buyer_phone") or "", f.get("buyer_address") or "",
-              new_sale_value, new_finance_amount, new_emi_amount, new_tenure, vid))
+        if row:
+            row.update({
+                "buyer_name": f.get("buyer_name") or "",
+                "buyer_phone": f.get("buyer_phone") or "",
+                "buyer_address": f.get("buyer_address") or "",
+                "sale_value": str(new_sale_value),
+                "finance_amount": str(new_finance_amount),
+                "emi_amount": str(new_emi_amount),
+                "tenure": str(new_tenure),
+            })
 
+        emis_rows = load_emi_rows()
         if new_emi_amount != old_emi_amount:
-            cur.execute("UPDATE emis SET amount=? WHERE buyer_id=? AND status!='Paid'", (new_emi_amount, buyer_id))
+            for emi in emis_rows:
+                if str(emi.get("buyer_id")) == str(buyer_id) and emi.get("status") != "Paid":
+                    emi["amount"] = str(new_emi_amount)
 
         if new_tenure > old_tenure:
             for i in range(old_tenure + 1, new_tenure + 1):
                 due = add_months(sale_date, i)
-                cur.execute("INSERT INTO emis (buyer_id, emi_no, due_date, amount, status) VALUES (?, ?, ?, ?, 'Unpaid')",
-                            (buyer_id, i, due.isoformat(), new_emi_amount))
+                emis_rows.append({
+                    "id": str(next_id(emis_rows, "id")),
+                    "buyer_id": str(buyer_id),
+                    "emi_no": str(i),
+                    "due_date": due.isoformat(),
+                    "amount": str(new_emi_amount),
+                    "status": "Unpaid",
+                    "paid_date": "",
+                })
         elif new_tenure < old_tenure:
-            cur.execute("DELETE FROM emis WHERE buyer_id=? AND emi_no>? AND status!='Paid'", (buyer_id, new_tenure))
+            emis_rows = [
+                emi for emi in emis_rows
+                if not (str(emi.get("buyer_id")) == str(buyer_id)
+                        and to_int(emi.get("emi_no") or 0) > new_tenure
+                        and emi.get("status") != "Paid")
+            ]
 
-        conn.commit()
-        conn.close()
+        save_full_rows(rows)
+        save_emi_rows(emis_rows)
         log_action(session.get("username"), "edit_buyer", f"vehicle:{vid} buyer:{buyer_id}")
         return redirect(url_for("view_vehicle", vid=vid))
 
-    conn.close()
     return render_template_string(EDIT_BUYER_HTML, buyer=buyer, vid=vid)
 
 # Toggle EMI (admin)
@@ -467,25 +588,29 @@ def edit_buyer(vid):
 @admin_required
 def toggle_emi(emi_id):
     action = request.form.get("action")
-    conn = get_db()
-    if action == "mark_paid":
-        conn.execute("UPDATE emis SET status='Paid', paid_date=? WHERE id=?", (date.today().isoformat(), emi_id))
-        log_action(session.get("username"), "mark_emi_paid", str(emi_id))
-    else:
-        conn.execute("UPDATE emis SET status='Unpaid', paid_date=NULL WHERE id=?", (emi_id,))
-        log_action(session.get("username"), "mark_emi_unpaid", str(emi_id))
-    conn.commit()
+    emis_rows = load_emi_rows()
+    for row in emis_rows:
+        if to_int(row.get("id") or 0) == emi_id:
+            if action == "mark_paid":
+                row["status"] = "Paid"
+                row["paid_date"] = date.today().isoformat()
+                log_action(session.get("username"), "mark_emi_paid", str(emi_id))
+            else:
+                row["status"] = "Unpaid"
+                row["paid_date"] = ""
+                log_action(session.get("username"), "mark_emi_unpaid", str(emi_id))
+            break
+    save_emi_rows(emis_rows)
     ref = request.form.get("ref") or url_for("dashboard")
-    conn.close()
     return redirect(ref)
 
 # ------------- Admin: Users management ----------------
 @app.route("/admin/users")
 @admin_required
 def admin_users():
-    conn = get_db()
-    users = conn.execute("SELECT id, username, name, role FROM users ORDER BY id").fetchall()
-    conn.close()
+    users = load_users()
+    users = [{**u, "id": to_int(u.get("id") or 0)} for u in users]
+    users.sort(key=lambda u: u.get("id") or 0)
     return render_template_string(ADMIN_USERS_HTML, users=users)
 
 @app.route("/admin/users/create", methods=["GET","POST"])
@@ -500,39 +625,42 @@ def admin_users_create():
         if not username or not pwd:
             return "username & password required", 400
         pwhash = generate_password_hash(pwd)
-        conn = get_db()
-        try:
-            conn.execute("INSERT INTO users (username,name,password_hash,role) VALUES (?,?,?,?)",
-                         (username, name, pwhash, role))
-            conn.commit()
-            conn.close()
-            log_action(session.get("username"), "create_user", username)
-            return redirect(url_for("admin_users"))
-        except sqlite3.IntegrityError:
-            conn.close()
+        users = load_users()
+        if any(u.get("username") == username for u in users):
             return "username exists", 400
+        users.append({
+            "id": str(next_id(users, "id")),
+            "username": username,
+            "name": name,
+            "password_hash": pwhash,
+            "role": role,
+        })
+        save_users(users)
+        log_action(session.get("username"), "create_user", username)
+        return redirect(url_for("admin_users"))
     return render_template_string(ADMIN_USERS_CREATE_HTML)
 
 @app.route("/admin/users/edit/<int:uid>", methods=["GET","POST"])
 @admin_required
 def admin_users_edit(uid):
-    conn = get_db()
     if request.method == "POST":
         f = request.form
         name = f.get("name").strip()
         role = f.get("role")
         pwd = f.get("password")
-        if pwd:
-            pwhash = generate_password_hash(pwd)
-            conn.execute("UPDATE users SET name=?, role=?, password_hash=? WHERE id=?", (name, role, pwhash, uid))
-        else:
-            conn.execute("UPDATE users SET name=?, role=? WHERE id=?", (name, role, uid))
-        conn.commit()
-        conn.close()
+        users = load_users()
+        for user in users:
+            if to_int(user.get("id") or 0) == uid:
+                user["name"] = name
+                user["role"] = role
+                if pwd:
+                    user["password_hash"] = generate_password_hash(pwd)
+                break
+        save_users(users)
         log_action(session.get("username"), "edit_user", str(uid))
         return redirect(url_for("admin_users"))
-    user = conn.execute("SELECT id, username, name, role FROM users WHERE id=?", (uid,)).fetchone()
-    conn.close()
+    users = load_users()
+    user = next((u for u in users if to_int(u.get("id") or 0) == uid), None)
     if not user:
         return redirect(url_for("admin_users"))
     return render_template_string(ADMIN_USERS_EDIT_HTML, user=user)
@@ -543,10 +671,9 @@ def admin_users_delete(uid):
     # prevent deleting yourself
     if session.get("user_id") == uid:
         return "Cannot delete yourself", 400
-    conn = get_db()
-    conn.execute("DELETE FROM users WHERE id=?", (uid,))
-    conn.commit()
-    conn.close()
+    users = load_users()
+    users = [u for u in users if to_int(u.get("id") or 0) != uid]
+    save_users(users)
     log_action(session.get("username"), "delete_user", str(uid))
     return redirect(url_for("admin_users"))
 
@@ -601,53 +728,60 @@ def admin_export_ui():
 @admin_required
 def admin_export_csv():
     typ = request.args.get("type", "full")
-    conn = get_db()
+    rows = load_full_rows()
 
     if typ == "vehicles":
-        rows = conn.execute("SELECT * FROM vehicles ORDER BY id").fetchall()
-        fieldnames = rows[0].keys() if rows else ["id","type","name","brand","model","color","number","status"]
-        rows_dicts = [dict(r) for r in rows]
-        conn.close()
+        fieldnames = ["id","type","name","brand","model","color","number","status"]
+        rows_dicts = [{
+            "id": row.get("vehicle_id", ""),
+            "type": row.get("type", ""),
+            "name": row.get("name", ""),
+            "brand": row.get("brand", ""),
+            "model": row.get("model", ""),
+            "color": row.get("color", ""),
+            "number": row.get("number", ""),
+            "status": row.get("status", ""),
+        } for row in rows]
         return rows_to_csv_response("vehicles.csv", fieldnames, rows_dicts)
 
     if typ == "sellers":
-        rows = conn.execute("SELECT * FROM sellers ORDER BY id").fetchall()
-        fieldnames = rows[0].keys() if rows else ["id","vehicle_id","seller_name","seller_phone","seller_city","buy_value","buy_date","comments"]
-        rows_dicts = [dict(r) for r in rows]
-        conn.close()
+        fieldnames = ["id","vehicle_id","seller_name","seller_phone","seller_city","buy_value","buy_date","comments"]
+        rows_dicts = [{
+            "id": row.get("vehicle_id", ""),
+            "vehicle_id": row.get("vehicle_id", ""),
+            "seller_name": row.get("seller_name", ""),
+            "seller_phone": row.get("seller_phone", ""),
+            "seller_city": row.get("seller_city", ""),
+            "buy_value": row.get("buy_value", ""),
+            "buy_date": row.get("buy_date", ""),
+            "comments": row.get("comments", ""),
+        } for row in rows]
         return rows_to_csv_response("sellers.csv", fieldnames, rows_dicts)
 
     if typ == "buyers":
-        rows = conn.execute("SELECT * FROM buyers ORDER BY id").fetchall()
-        fieldnames = rows[0].keys() if rows else ["id","vehicle_id","record_no","buyer_name","buyer_phone","buyer_address","sale_value","finance_amount","emi_amount","tenure","sale_date"]
-        rows_dicts = [dict(r) for r in rows]
-        conn.close()
+        fieldnames = ["id","vehicle_id","record_no","buyer_name","buyer_phone","buyer_address","sale_value","finance_amount","emi_amount","tenure","sale_date"]
+        rows_dicts = [{
+            "id": row.get("buyer_id", ""),
+            "vehicle_id": row.get("vehicle_id", ""),
+            "record_no": row.get("record_no", ""),
+            "buyer_name": row.get("buyer_name", ""),
+            "buyer_phone": row.get("buyer_phone", ""),
+            "buyer_address": row.get("buyer_address", ""),
+            "sale_value": row.get("sale_value", ""),
+            "finance_amount": row.get("finance_amount", ""),
+            "emi_amount": row.get("emi_amount", ""),
+            "tenure": row.get("tenure", ""),
+            "sale_date": row.get("sale_date", ""),
+        } for row in rows if row.get("buyer_id")]
         return rows_to_csv_response("buyers.csv", fieldnames, rows_dicts)
 
     if typ == "emis":
-        rows = conn.execute("SELECT * FROM emis ORDER BY id").fetchall()
-        fieldnames = rows[0].keys() if rows else ["id","buyer_id","emi_no","due_date","amount","status","paid_date"]
-        rows_dicts = [dict(r) for r in rows]
-        conn.close()
-        return rows_to_csv_response("emis.csv", fieldnames, rows_dicts)
+        rows = load_emi_rows()
+        fieldnames = EMI_FIELDS
+        return rows_to_csv_response("emis.csv", fieldnames, rows)
 
-    # "full" export: vehicles joined to seller and buyer (one row per vehicle)
-    sql = """
-    SELECT v.id as vehicle_id, v.type, v.name, v.brand, v.model, v.color, v.number, v.status,
-           s.seller_name, s.seller_phone, s.seller_city, s.buy_value, s.buy_date, s.comments,
-           b.id as buyer_id, b.record_no, b.buyer_name, b.buyer_phone, b.buyer_address, b.sale_value, b.finance_amount, b.emi_amount, b.tenure, b.sale_date
-    FROM vehicles v
-    LEFT JOIN sellers s ON s.vehicle_id = v.id
-    LEFT JOIN buyers b ON b.vehicle_id = v.id
-    ORDER BY v.id
-    """
-    rows = conn.execute(sql).fetchall()
-    fieldnames = ["vehicle_id","type","name","brand","model","color","number","status",
-                  "seller_name","seller_phone","seller_city","buy_value","buy_date","comments",
-                  "buyer_id","record_no","buyer_name","buyer_phone","buyer_address","sale_value","finance_amount","emi_amount","tenure","sale_date"]
-    rows_dicts = [dict(r) for r in rows]
-    conn.close()
-    return rows_to_csv_response("full_export.csv", fieldnames, rows_dicts)
+    fieldnames = FULL_FIELDS
+    return rows_to_csv_response("full_export.csv", fieldnames, rows)
 
 # ----------------- Templates -----------------
 # (kept concise and consistent: use 'e' as emi loop var)
