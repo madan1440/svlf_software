@@ -107,6 +107,27 @@ def to_int(value, default=0):
     except (TypeError, ValueError):
         return default
 
+def parse_iso_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+def derive_emi_status(emi_row, today=None):
+    today = today or date.today()
+    if (emi_row.get("status") or "").strip().lower() == "paid":
+        return "Paid"
+    due_date = parse_iso_date(emi_row.get("due_date"))
+    if not due_date:
+        return "Unpaid"
+    if due_date < today:
+        return "Overdue"
+    if due_date > today:
+        return "Upcoming"
+    return "Due Today"
+
 def seed_initial_users():
     users = load_users()
     if users:
@@ -269,16 +290,45 @@ def logout():
 @login_required
 def dashboard():
     q = request.args.get("q", "").strip()
-    vtype = request.args.get("type", "ALL")
-    status = request.args.get("status", "ALL")
+    vtype = request.args.get("type", "Car")
+    metric = request.args.get("metric", "ALL")
+    if vtype not in {"Car", "Bike"}:
+        vtype = "Car"
+    if metric not in {"ALL", "Stock", "Sold", "EMI_PENDING"}:
+        metric = "ALL"
 
     rows = load_full_rows()
+    emi_rows = load_emi_rows()
+    overdue_buyer_ids = {
+        str(emi.get("buyer_id"))
+        for emi in emi_rows
+        if derive_emi_status(emi) == "Overdue"
+    }
+    type_rows = [row for row in rows if row.get("type") == vtype]
+
+    total = len(type_rows)
+    stock = sum(1 for row in type_rows if row.get("status") == "Stock")
+    sold = sum(1 for row in type_rows if row.get("status") == "Sold")
+    emi_pending = sum(
+        1 for row in type_rows
+        if row.get("status") == "Sold"
+        and row.get("buyer_id")
+        and str(row.get("buyer_id")) in overdue_buyer_ids
+    )
+
     vehicles = []
     q_lower = q.lower()
-    for row in rows:
-        if vtype and vtype != "ALL" and row.get("type") != vtype:
+    for row in type_rows:
+        if metric == "Stock" and row.get("status") != "Stock":
             continue
-        if status and status != "ALL" and row.get("status") != status:
+        if metric == "Sold" and row.get("status") != "Sold":
+            continue
+        if metric == "EMI_PENDING":
+            if row.get("status") != "Sold":
+                continue
+            if str(row.get("buyer_id")) not in overdue_buyer_ids:
+                continue
+        if metric == "ALL" and row.get("status") not in {"Stock", "Sold"}:
             continue
         if q:
             haystack = " ".join([
@@ -286,14 +336,26 @@ def dashboard():
                 row.get("brand", ""),
                 row.get("model", ""),
                 row.get("number", ""),
+                row.get("seller_name", ""),
+                row.get("seller_phone", ""),
+                row.get("seller_city", ""),
+                row.get("buyer_name", ""),
+                row.get("buyer_phone", ""),
             ]).lower()
             if q_lower not in haystack:
                 continue
         vehicles.append(vehicle_row_from_full(row))
-    total = len(rows)
-    stock = sum(1 for row in rows if row.get("status") == "Stock")
-    sold = sum(1 for row in rows if row.get("status") == "Sold")
-    return render_template_string(DASHBOARD_HTML, vehicles=vehicles, q=q, vtype=vtype, status=status, total=total, stock=stock, sold=sold)
+    return render_template_string(
+        DASHBOARD_HTML,
+        vehicles=vehicles,
+        q=q,
+        vtype=vtype,
+        metric=metric,
+        total=total,
+        stock=stock,
+        sold=sold,
+        emi_pending=emi_pending,
+    )
 
 # Add vehicle (admin only) — Bike default
 @app.route("/add", methods=["GET","POST"])
@@ -469,6 +531,8 @@ def view_vehicle(vid):
     s = seller_from_full(row) if row else None
     b = buyer_from_full(row) if row else None
     emis = emis_for_buyer(b["id"]) if b else []
+    for emi in emis:
+        emi["derived_status"] = derive_emi_status(emi)
     if not v:
         return redirect(url_for("dashboard"))
     return render_template_string(VIEW_HTML, v=v, s=s, b=b, emis=emis)
@@ -815,7 +879,18 @@ th,td{padding:10px;border-bottom:1px solid #eef2ff;text-align:left}
 .form-stack{display:flex;flex-direction:column;gap:10px}
 .small-btn{padding:6px 8px;border-radius:6px}
 .link{color:var(--primary);text-decoration:none}
-.top-right{position:absolute;right:18px;top:12px;color:white}
+.top-right{position:absolute;right:120px;top:12px;color:white}
+.search-input{width:100%;min-width:520px;max-width:760px;padding:12px 14px;border:1px solid #dbe5f4;border-radius:10px}
+.metric-total{background:#eef2ff;border-color:#c7d2fe}
+.metric-stock{background:#ecfdf5;border-color:#86efac}
+.metric-sold{background:#fef2f2;border-color:#fca5a5}
+.metric-emi{background:#fffbeb;border-color:#fcd34d}
+.pill{padding:8px 12px;border-radius:999px;border:1px solid #cbd5e1;text-decoration:none;color:#0f172a;background:#fff;font-weight:600}
+.pill.active{background:#2563eb;color:#fff;border-color:#2563eb}
+.metric-card{flex:1;text-decoration:none;color:inherit;border:1px solid #e2e8f0;border-radius:10px;padding:10px;display:block}
+.metric-card.active{border-color:#2563eb;background:#eff6ff}
+.emi-overdue{background:#fef3c7;color:#92400e}
+.emi-upcoming{background:#dbeafe;color:#1e3a8a}
 @media(max-width:780px){ .controls{flex-direction:column} .controls .left{flex-direction:column;align-items:stretch} th,td{display:block} tr{margin-bottom:12px} }
 </style>
 """
@@ -825,34 +900,30 @@ DASHBOARD_HTML = """
 """ + BASE_CSS + """</head><body>
 <header>
   <div style="max-width:1100px;margin:0 auto;padding:0 18px"><strong>Sai Vijaya Laxmi Vehicle Finance</strong>
-    <span class="top-right">{% if current_username %}{{ current_username }} ({{ current_role }}) • <a href="{{ url_for('logout') }}" style="color:white">Logout</a>{% endif %}</span>
+    <span class="top-right">{% if current_username %}<a href="{{ url_for('logout') }}" style="color:white">Logout</a>{% endif %}</span>
   </div>
 </header>
 <div class="container">
   <div class="controls">
     <div class="left">
-      <form id="searchForm" method="get" action="/" style="display:flex;gap:8px;align-items:center;width:100%">
-        <input type="text" name="q" placeholder="Search name / brand / model / vehicle number" value="{{ q }}">
-        <select name="type">
-          <option value="ALL" {% if vtype=='ALL' %}selected{% endif %}>All Types</option>
-          <option value="Car" {% if vtype=='Car' %}selected{% endif %}>Car</option>
-          <option value="Bike" {% if vtype=='Bike' %}selected{% endif %}>Bike</option>
-        </select>
-        <select name="status">
-          <option value="ALL" {% if status=='ALL' %}selected{% endif %}>All Status</option>
-          <option value="Stock" {% if status=='Stock' %}selected{% endif %}>In Stock</option>
-          <option value="Sold" {% if status=='Sold' %}selected{% endif %}>Sold</option>
-        </select>
-        <button class="btn" type="submit">Search</button>
+      <form id="searchForm" method="get" action="/" style="display:flex;gap:8px;align-items:center;width:100%" onsubmit="return false;">
+        <input type="hidden" name="type" value="{{ vtype }}">
+        <input type="hidden" name="metric" value="{{ metric }}">
+        <input id="searchInput" class="search-input" type="text" name="q" placeholder="Search by vehicle, seller/buyer name, phone, city" value="{{ q }}" autocomplete="off">
       </form>
+    </div>
+    <div style="display:flex;gap:8px">
+      <a class="pill {% if vtype=='Car' %}active{% endif %}" href="{{ url_for('dashboard', type='Car', metric=metric, q=q) }}">Cars</a>
+      <a class="pill {% if vtype=='Bike' %}active{% endif %}" href="{{ url_for('dashboard', type='Bike', metric=metric, q=q) }}">Bikes</a>
     </div>
     <div>{% if current_role == 'admin' %}<a class="btn" href="{{ url_for('add_vehicle') }}">+ Add Vehicle</a>{% endif %}</div>
   </div>
 
   <div class="card" style="display:flex;gap:12px;">
-    <div style="flex:1"><div style="color:var(--muted)">Total</div><div style="font-weight:700">{{ total }}</div></div>
-    <div style="flex:1"><div style="color:var(--muted)">In Stock</div><div style="font-weight:700">{{ stock }}</div></div>
-    <div style="flex:1"><div style="color:var(--muted)">Sold</div><div style="font-weight:700">{{ sold }}</div></div>
+    <a class="metric-card metric-total {% if metric=='ALL' %}active{% endif %}" href="{{ url_for('dashboard', type=vtype, metric='ALL', q=q) }}"><div style="color:var(--muted)">Total</div><div style="font-weight:700">{{ total }}</div></a>
+    <a class="metric-card metric-stock {% if metric=='Stock' %}active{% endif %}" href="{{ url_for('dashboard', type=vtype, metric='Stock', q=q) }}"><div style="color:var(--muted)">In Stock</div><div style="font-weight:700">{{ stock }}</div></a>
+    <a class="metric-card metric-sold {% if metric=='Sold' %}active{% endif %}" href="{{ url_for('dashboard', type=vtype, metric='Sold', q=q) }}"><div style="color:var(--muted)">Sold</div><div style="font-weight:700">{{ sold }}</div></a>
+    <a class="metric-card metric-emi {% if metric=='EMI_PENDING' %}active{% endif %}" href="{{ url_for('dashboard', type=vtype, metric='EMI_PENDING', q=q) }}"><div style="color:var(--muted)">EMI Pending</div><div style="font-weight:700">{{ emi_pending }}</div></a>
   </div>
 
   <div class="card">
@@ -869,11 +940,12 @@ DASHBOARD_HTML = """
           <td><a href="{{ url_for('view_vehicle', vid=v.id) }}" class="link">{{ v.number }}</a></td>
           <td>{% if v.status=='Stock' %}<span class="badge stock">In Stock</span>{% else %}<span class="badge sold">Sold</span>{% endif %}</td>
           <td>
-            <a href="{{ url_for('view_vehicle', vid=v.id) }}">View</a>
             {% if current_role == 'admin' %}
-             | <a href="{{ url_for('edit_vehicle', vid=v.id) }}">Edit</a>
+             <a href="{{ url_for('edit_vehicle', vid=v.id) }}">Edit</a>
              {% if v.status=='Stock' %} | <a href="{{ url_for('sell_vehicle', vid=v.id) }}">Sell</a>{% endif %}
              | <a href="#" onclick="if(confirm('Delete vehicle and all related data?')) location.href='{{ url_for('delete_vehicle', vid=v.id) }}'">Delete</a>
+            {% else %}
+             -
             {% endif %}
           </td>
         </tr>
@@ -890,7 +962,24 @@ DASHBOARD_HTML = """
     <a class="btn" href="{{ url_for('admin_export_ui') }}" style="margin-left:8px">Export CSV</a>
   </div>
   {% endif %}
-</div></body></html>
+</div>
+<script>
+(function(){
+  const input = document.getElementById('searchInput');
+  const form = document.getElementById('searchForm');
+  if (!input || !form) return;
+  let timer;
+  input.addEventListener('input', function(){
+    clearTimeout(timer);
+    timer = setTimeout(function(){
+      const params = new URLSearchParams(new FormData(form));
+      const url = form.action + '?' + params.toString();
+      window.location.assign(url);
+    }, 320);
+  });
+})();
+</script>
+</body></html>
 """
 
 ADD_HTML = """
@@ -1003,7 +1092,17 @@ VIEW_HTML = """
         <td>{{ e.emi_no }}</td>
         <td>{{ e.due_date }}</td>
         <td>₹{{ e.amount }}</td>
-        <td>{{ e.status }}</td>
+        <td>
+          {% if e.derived_status == 'Paid' %}
+            <span class="badge stock">Paid</span>
+          {% elif e.derived_status == 'Overdue' %}
+            <span class="badge emi-overdue">Overdue</span>
+          {% elif e.derived_status == 'Upcoming' %}
+            <span class="badge emi-upcoming">Upcoming</span>
+          {% else %}
+            <span class="badge sold">{{ e.derived_status }}</span>
+          {% endif %}
+        </td>
         <td>
           {% if current_role == 'admin' %}
             <form method="post" action="{{ url_for('toggle_emi', emi_id=e.id) }}" style="display:inline">
