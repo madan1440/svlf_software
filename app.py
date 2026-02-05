@@ -906,10 +906,10 @@ DASHBOARD_HTML = """
 <div class="container">
   <div class="controls">
     <div class="left">
-      <form id="searchForm" method="get" action="/" style="display:flex;gap:8px;align-items:center;width:100%" onsubmit="return false;">
+      <form id="searchForm" method="get" action="/" style="display:flex;gap:8px;align-items:center;width:100%">
         <input type="hidden" name="type" value="{{ vtype }}">
         <input type="hidden" name="metric" value="{{ metric }}">
-        <input id="searchInput" class="search-input" type="text" name="q" placeholder="Search by vehicle, seller/buyer name, phone, city" value="{{ q }}" autocomplete="off">
+        <input id="searchInput" class="search-input" type="text" name="q" placeholder="Search by vehicle, seller/buyer name, phone, city (press Enter)" value="{{ q }}" autocomplete="off">
       </form>
     </div>
     <div style="display:flex;gap:8px">
@@ -963,22 +963,6 @@ DASHBOARD_HTML = """
   </div>
   {% endif %}
 </div>
-<script>
-(function(){
-  const input = document.getElementById('searchInput');
-  const form = document.getElementById('searchForm');
-  if (!input || !form) return;
-  let timer;
-  input.addEventListener('input', function(){
-    clearTimeout(timer);
-    timer = setTimeout(function(){
-      const params = new URLSearchParams(new FormData(form));
-      const url = form.action + '?' + params.toString();
-      window.location.assign(url);
-    }, 320);
-  });
-})();
-</script>
 </body></html>
 """
 
