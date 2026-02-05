@@ -975,6 +975,9 @@ th,td{padding:10px;border-bottom:1px solid #eef2ff;text-align:left}
 .metric-card.active{border-color:#2563eb;background:#eff6ff}
 .emi-overdue{background:#fef3c7;color:#92400e}
 .emi-upcoming{background:#dbeafe;color:#1e3a8a}
+.vehicle-table-scroll{max-height:460px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:10px}
+.vehicle-table-scroll table{margin:0}
+.vehicle-table-scroll thead th{position:sticky;top:0;background:#f8fafc;z-index:1}
 @media(max-width:780px){ .controls{flex-direction:column} .controls .left{flex-direction:column;align-items:stretch} th,td{display:block} tr{margin-bottom:12px} }
 </style>
 """
@@ -1011,34 +1014,36 @@ DASHBOARD_HTML = """
   </div>
 
   <div class="card">
-    <table class="table">
-      <thead><tr><th>#</th><th>Type</th><th>Name</th><th>Brand</th><th>Model</th><th>Number</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody id="vehiclesBody">
-      {% for v in vehicles %}
-        <tr>
-          <td>{{ loop.index }}</td>
-          <td>{{ v.type }}</td>
-          <td>{{ v.name }}</td>
-          <td>{{ v.brand }}</td>
-          <td>{{ v.model }}</td>
-          <td><a href="{{ url_for('view_vehicle', vid=v.id) }}" class="link">{{ v.number }}</a></td>
-          <td>{% if v.status=='Stock' %}<span class="badge stock">In Stock</span>{% else %}<span class="badge sold">Sold</span>{% endif %}</td>
-          <td>
-            {% if current_role == 'admin' %}
-             <a href="{{ url_for('edit_vehicle', vid=v.id) }}">Edit</a>
-             {% if v.status=='Stock' %} | <a href="{{ url_for('sell_vehicle', vid=v.id) }}">Sell</a>{% endif %}
-             | <a href="#" onclick="if(confirm('Delete vehicle and all related data?')) location.href='{{ url_for('delete_vehicle', vid=v.id) }}'">Delete</a>
-            {% else %}
-             -
-            {% endif %}
-          </td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-    <div id="vehiclesLoader" style="padding:12px;text-align:center;color:var(--muted);{% if not has_more %}display:none;{% endif %}">Loading more vehicles...</div>
-    <div id="vehiclesEnd" style="padding:12px;text-align:center;color:var(--muted);{% if has_more %}display:none;{% endif %}">All vehicles loaded.</div>
-    <div id="vehiclesSentinel" style="height:1px"></div>
+    <div id="vehiclesScroll" class="vehicle-table-scroll">
+      <table class="table">
+        <thead><tr><th>#</th><th>Type</th><th>Name</th><th>Brand</th><th>Model</th><th>Number</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody id="vehiclesBody">
+        {% for v in vehicles %}
+          <tr>
+            <td>{{ loop.index }}</td>
+            <td>{{ v.type }}</td>
+            <td>{{ v.name }}</td>
+            <td>{{ v.brand }}</td>
+            <td>{{ v.model }}</td>
+            <td><a href="{{ url_for('view_vehicle', vid=v.id) }}" class="link">{{ v.number }}</a></td>
+            <td>{% if v.status=='Stock' %}<span class="badge stock">In Stock</span>{% else %}<span class="badge sold">Sold</span>{% endif %}</td>
+            <td>
+              {% if current_role == 'admin' %}
+               <a href="{{ url_for('edit_vehicle', vid=v.id) }}">Edit</a>
+               {% if v.status=='Stock' %} | <a href="{{ url_for('sell_vehicle', vid=v.id) }}">Sell</a>{% endif %}
+               | <a href="#" onclick="if(confirm('Delete vehicle and all related data?')) location.href='{{ url_for('delete_vehicle', vid=v.id) }}'">Delete</a>
+              {% else %}
+               -
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <div id="vehiclesLoader" style="padding:12px;text-align:center;color:var(--muted);{% if not has_more %}display:none;{% endif %}">Loading more vehicles...</div>
+      <div id="vehiclesEnd" style="padding:12px;text-align:center;color:var(--muted);{% if has_more %}display:none;{% endif %}">All vehicles loaded.</div>
+      <div id="vehiclesSentinel" style="height:1px"></div>
+    </div>
   </div>
 
 
@@ -1048,7 +1053,8 @@ DASHBOARD_HTML = """
   const sentinel = document.getElementById('vehiclesSentinel');
   const loader = document.getElementById('vehiclesLoader');
   const end = document.getElementById('vehiclesEnd');
-  if (!body || !sentinel) return;
+  const scrollRoot = document.getElementById('vehiclesScroll');
+  if (!body || !sentinel || !scrollRoot) return;
 
   let offset = {{ initial_count }};
   const limit = {{ vehicle_page_size }};
@@ -1092,7 +1098,7 @@ DASHBOARD_HTML = """
         loadMore();
       }
     });
-  }, { rootMargin: '250px' });
+  }, { root: scrollRoot, rootMargin: '150px' });
   observer.observe(sentinel);
 })();
 </script>
