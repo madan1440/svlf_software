@@ -336,6 +336,11 @@ def dashboard():
                 row.get("brand", ""),
                 row.get("model", ""),
                 row.get("number", ""),
+                row.get("seller_name", ""),
+                row.get("seller_phone", ""),
+                row.get("seller_city", ""),
+                row.get("buyer_name", ""),
+                row.get("buyer_phone", ""),
             ]).lower()
             if q_lower not in haystack:
                 continue
@@ -874,7 +879,12 @@ th,td{padding:10px;border-bottom:1px solid #eef2ff;text-align:left}
 .form-stack{display:flex;flex-direction:column;gap:10px}
 .small-btn{padding:6px 8px;border-radius:6px}
 .link{color:var(--primary);text-decoration:none}
-.top-right{position:absolute;right:18px;top:12px;color:white}
+.top-right{position:absolute;right:120px;top:12px;color:white}
+.search-input{width:100%;min-width:520px;max-width:760px;padding:12px 14px;border:1px solid #dbe5f4;border-radius:10px}
+.metric-total{background:#eef2ff;border-color:#c7d2fe}
+.metric-stock{background:#ecfdf5;border-color:#86efac}
+.metric-sold{background:#fef2f2;border-color:#fca5a5}
+.metric-emi{background:#fffbeb;border-color:#fcd34d}
 .pill{padding:8px 12px;border-radius:999px;border:1px solid #cbd5e1;text-decoration:none;color:#0f172a;background:#fff;font-weight:600}
 .pill.active{background:#2563eb;color:#fff;border-color:#2563eb}
 .metric-card{flex:1;text-decoration:none;color:inherit;border:1px solid #e2e8f0;border-radius:10px;padding:10px;display:block}
@@ -890,17 +900,16 @@ DASHBOARD_HTML = """
 """ + BASE_CSS + """</head><body>
 <header>
   <div style="max-width:1100px;margin:0 auto;padding:0 18px"><strong>Sai Vijaya Laxmi Vehicle Finance</strong>
-    <span class="top-right">{% if current_username %}{{ current_username }} ({{ current_role }}) • <a href="{{ url_for('logout') }}" style="color:white">Logout</a>{% endif %}</span>
+    <span class="top-right">{% if current_username %}<a href="{{ url_for('logout') }}" style="color:white">Logout</a>{% endif %}</span>
   </div>
 </header>
 <div class="container">
   <div class="controls">
     <div class="left">
-      <form id="searchForm" method="get" action="/" style="display:flex;gap:8px;align-items:center;width:100%">
+      <form id="searchForm" method="get" action="/" style="display:flex;gap:8px;align-items:center;width:100%" onsubmit="return false;">
         <input type="hidden" name="type" value="{{ vtype }}">
         <input type="hidden" name="metric" value="{{ metric }}">
-        <input type="text" name="q" placeholder="Search name / brand / model / vehicle number" value="{{ q }}">
-        <button class="btn" type="submit">Search</button>
+        <input id="searchInput" class="search-input" type="text" name="q" placeholder="Search by vehicle, seller/buyer name, phone, city" value="{{ q }}" autocomplete="off">
       </form>
     </div>
     <div style="display:flex;gap:8px">
@@ -911,10 +920,10 @@ DASHBOARD_HTML = """
   </div>
 
   <div class="card" style="display:flex;gap:12px;">
-    <a class="metric-card {% if metric=='ALL' %}active{% endif %}" href="{{ url_for('dashboard', type=vtype, metric='ALL', q=q) }}"><div style="color:var(--muted)">Total</div><div style="font-weight:700">{{ total }}</div></a>
-    <a class="metric-card {% if metric=='Stock' %}active{% endif %}" href="{{ url_for('dashboard', type=vtype, metric='Stock', q=q) }}"><div style="color:var(--muted)">In Stock</div><div style="font-weight:700">{{ stock }}</div></a>
-    <a class="metric-card {% if metric=='Sold' %}active{% endif %}" href="{{ url_for('dashboard', type=vtype, metric='Sold', q=q) }}"><div style="color:var(--muted)">Sold</div><div style="font-weight:700">{{ sold }}</div></a>
-    <a class="metric-card {% if metric=='EMI_PENDING' %}active{% endif %}" href="{{ url_for('dashboard', type=vtype, metric='EMI_PENDING', q=q) }}"><div style="color:var(--muted)">EMI Pending</div><div style="font-weight:700">{{ emi_pending }}</div></a>
+    <a class="metric-card metric-total {% if metric=='ALL' %}active{% endif %}" href="{{ url_for('dashboard', type=vtype, metric='ALL', q=q) }}"><div style="color:var(--muted)">Total</div><div style="font-weight:700">{{ total }}</div></a>
+    <a class="metric-card metric-stock {% if metric=='Stock' %}active{% endif %}" href="{{ url_for('dashboard', type=vtype, metric='Stock', q=q) }}"><div style="color:var(--muted)">In Stock</div><div style="font-weight:700">{{ stock }}</div></a>
+    <a class="metric-card metric-sold {% if metric=='Sold' %}active{% endif %}" href="{{ url_for('dashboard', type=vtype, metric='Sold', q=q) }}"><div style="color:var(--muted)">Sold</div><div style="font-weight:700">{{ sold }}</div></a>
+    <a class="metric-card metric-emi {% if metric=='EMI_PENDING' %}active{% endif %}" href="{{ url_for('dashboard', type=vtype, metric='EMI_PENDING', q=q) }}"><div style="color:var(--muted)">EMI Pending</div><div style="font-weight:700">{{ emi_pending }}</div></a>
   </div>
 
   <div class="card">
@@ -953,7 +962,24 @@ DASHBOARD_HTML = """
     <a class="btn" href="{{ url_for('admin_export_ui') }}" style="margin-left:8px">Export CSV</a>
   </div>
   {% endif %}
-</div></body></html>
+</div>
+<script>
+(function(){
+  const input = document.getElementById('searchInput');
+  const form = document.getElementById('searchForm');
+  if (!input || !form) return;
+  let timer;
+  input.addEventListener('input', function(){
+    clearTimeout(timer);
+    timer = setTimeout(function(){
+      const params = new URLSearchParams(new FormData(form));
+      const url = form.action + '?' + params.toString();
+      window.location.assign(url);
+    }, 320);
+  });
+})();
+</script>
+</body></html>
 """
 
 ADD_HTML = """
