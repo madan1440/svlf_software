@@ -109,6 +109,17 @@ def to_int(value, default=0):
     except (TypeError, ValueError):
         return default
 
+def normalize_finance_terms(finance_amount, emi_amount, tenure):
+    finance_amount = max(finance_amount, 0)
+    emi_amount = max(emi_amount, 0)
+    tenure = max(tenure, 0)
+
+    # No-finance sale: store EMI details as zero and skip EMI generation.
+    if finance_amount == 0:
+        return 0, 0, 0
+
+    return finance_amount, emi_amount, tenure
+
 def parse_iso_date(value):
     if not value:
         return None
@@ -325,10 +336,10 @@ def logout():
 @login_required
 def dashboard():
     q = request.args.get("q", "").strip()
-    vtype = request.args.get("type", "Car")
+    vtype = request.args.get("type", "Bike")
     metric = request.args.get("metric", "ALL")
     if vtype not in {"Car", "Bike"}:
-        vtype = "Car"
+        vtype = "Bike"
     if metric not in {"ALL", "Stock", "Sold", "EMI_PENDING"}:
         metric = "ALL"
 
@@ -374,13 +385,13 @@ def dashboard():
 @login_required
 def dashboard_vehicle_page():
     q = request.args.get("q", "").strip()
-    vtype = request.args.get("type", "Car")
+    vtype = request.args.get("type", "Bike")
     metric = request.args.get("metric", "ALL")
     offset = max(to_int(request.args.get("offset"), 0), 0)
     limit = max(to_int(request.args.get("limit"), VEHICLE_PAGE_SIZE), 1)
 
     if vtype not in {"Car", "Bike"}:
-        vtype = "Car"
+        vtype = "Bike"
     if metric not in {"ALL", "Stock", "Sold", "EMI_PENDING"}:
         metric = "ALL"
 
@@ -566,6 +577,8 @@ def sell_vehicle(vid):
         except:
             tenure = 0
 
+        finance_amount, emi_amount, tenure = normalize_finance_terms(finance_amount, emi_amount, tenure)
+
         sale_date = f.get("sale_date") or datetime.now().strftime("%Y-%m-%d")
         buyer_id = next_id(rows, "buyer_id")
         for current in rows:
@@ -647,6 +660,10 @@ def edit_buyer(vid):
             new_tenure = int(float(f.get("tenure") or 0))
         except:
             new_tenure = 0
+
+        new_finance_amount, new_emi_amount, new_tenure = normalize_finance_terms(
+            new_finance_amount, new_emi_amount, new_tenure
+        )
 
         if not buyer:
             sale_date = datetime.now().strftime("%Y-%m-%d")
@@ -1181,8 +1198,8 @@ SELL_HTML = """
   <label>Buyer Address</label><textarea name="buyer_address"></textarea>
   <label>Sale Value (integer)</label><input name="sale_value" type="number" step="1">
   <label>Finance Amount (integer)</label><input name="finance_amount" type="number" step="1">
-  <label>EMI Amount (integer monthly)</label><input name="emi_amount" type="number" step="1" required>
-  <label>Tenure (months)</label><input name="tenure" type="number" step="1" min="1" required>
+  <label>EMI Amount (integer monthly)</label><input name="emi_amount" type="number" step="1" min="0">
+  <label>Tenure (months)</label><input name="tenure" type="number" step="1" min="0">
   <label>Sale Date</label><input name="sale_date" type="date" value="{{ today }}">
   <div><button class="btn" type="submit">Confirm Sale & Generate EMIs</button></div>
 </form></div></div></body></html>
@@ -1214,7 +1231,9 @@ VIEW_HTML = """
   {% if b %}
   <div class="card">
     <h3>Buyer & Finance</h3>
+    <p><strong>Record #:</strong> {{ b.record_no or '-' }}</p>
     <p><strong>Buyer:</strong> {{ b.buyer_name }} • {{ b.buyer_phone }}</p>
+    <p><strong>Address:</strong> {{ b.buyer_address or '-' }}</p>
     <p><strong>Sale Value:</strong> ₹{{ b.sale_value }} • <strong>Finance:</strong> ₹{{ b.finance_amount }}</p>
     <p><strong>EMI:</strong> ₹{{ b.emi_amount }} • <strong>Tenure:</strong> {{ b.tenure }} months • <strong>Sold on:</strong> {{ b.sale_date }}</p>
 
@@ -1273,7 +1292,7 @@ EDIT_BUYER_HTML = """
   <label>Sale Value (integer)</label><input name="sale_value" type="number" step="1" value="{{ buyer.sale_value if buyer else '' }}">
   <label>Finance Amount (integer)</label><input name="finance_amount" type="number" step="1" value="{{ buyer.finance_amount if buyer else '' }}">
   <label>EMI Amount (integer)</label><input name="emi_amount" type="number" step="1" value="{{ buyer.emi_amount if buyer else '' }}">
-  <label>Tenure (months)</label><input name="tenure" type="number" step="1" min="1" value="{{ buyer.tenure if buyer else '' }}">
+  <label>Tenure (months)</label><input name="tenure" type="number" step="1" min="0" value="{{ buyer.tenure if buyer else '' }}">
   <div><button class="btn" type="submit">Save Buyer</button></div>
 </form></div></div></body></html>
 """
