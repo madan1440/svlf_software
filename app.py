@@ -12,6 +12,7 @@ from flask import (
 )
 from dateutil.relativedelta import relativedelta
 from werkzeug.security import generate_password_hash, check_password_hash
+from markupsafe import escape
 
 # # ----------------- CONFIG -----------------
 FULL_CSV = os.environ.get("FULL_CSV_PATH", "full.csv")
@@ -21,6 +22,7 @@ AUDIT_CSV = os.environ.get("AUDIT_CSV_PATH", "audit_log.csv")
 SECRET_KEY = os.environ.get("SECRET_KEY", "change_this_for_prod")
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", "backups"))
 BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "10"))
+VEHICLE_PAGE_SIZE = int(os.environ.get("VEHICLE_PAGE_SIZE", "15"))
 
 INITIAL_USERS = [
     {"username": "9492126272", "password": "Madan@1440", "role": "admin", "name": "Admin One"},
@@ -208,6 +210,39 @@ def log_action(who, action, target=""):
     except Exception:
         pass
 
+
+def filtered_vehicle_rows(rows, q, metric, overdue_buyer_ids):
+    vehicles = []
+    q_lower = q.lower()
+    for row in rows:
+        if metric == "Stock" and row.get("status") != "Stock":
+            continue
+        if metric == "Sold" and row.get("status") != "Sold":
+            continue
+        if metric == "EMI_PENDING":
+            if row.get("status") != "Sold":
+                continue
+            if str(row.get("buyer_id")) not in overdue_buyer_ids:
+                continue
+        if metric == "ALL" and row.get("status") not in {"Stock", "Sold"}:
+            continue
+        if q:
+            haystack = " ".join([
+                row.get("name", ""),
+                row.get("brand", ""),
+                row.get("model", ""),
+                row.get("number", ""),
+                row.get("seller_name", ""),
+                row.get("seller_phone", ""),
+                row.get("seller_city", ""),
+                row.get("buyer_name", ""),
+                row.get("buyer_phone", ""),
+            ]).lower()
+            if q_lower not in haystack:
+                continue
+        vehicles.append(vehicle_row_from_full(row))
+    return vehicles
+
 # ----------------- auth & decorators -----------------
 def login_required(view):
     @wraps(view)
@@ -316,38 +351,15 @@ def dashboard():
         and str(row.get("buyer_id")) in overdue_buyer_ids
     )
 
-    vehicles = []
-    q_lower = q.lower()
-    for row in type_rows:
-        if metric == "Stock" and row.get("status") != "Stock":
-            continue
-        if metric == "Sold" and row.get("status") != "Sold":
-            continue
-        if metric == "EMI_PENDING":
-            if row.get("status") != "Sold":
-                continue
-            if str(row.get("buyer_id")) not in overdue_buyer_ids:
-                continue
-        if metric == "ALL" and row.get("status") not in {"Stock", "Sold"}:
-            continue
-        if q:
-            haystack = " ".join([
-                row.get("name", ""),
-                row.get("brand", ""),
-                row.get("model", ""),
-                row.get("number", ""),
-                row.get("seller_name", ""),
-                row.get("seller_phone", ""),
-                row.get("seller_city", ""),
-                row.get("buyer_name", ""),
-                row.get("buyer_phone", ""),
-            ]).lower()
-            if q_lower not in haystack:
-                continue
-        vehicles.append(vehicle_row_from_full(row))
+    filtered_vehicles = filtered_vehicle_rows(type_rows, q, metric, overdue_buyer_ids)
+    vehicles = filtered_vehicles[:VEHICLE_PAGE_SIZE]
+    has_more = len(filtered_vehicles) > len(vehicles)
     return render_template_string(
         DASHBOARD_HTML,
         vehicles=vehicles,
+        vehicle_page_size=VEHICLE_PAGE_SIZE,
+        initial_count=len(vehicles),
+        has_more=has_more,
         q=q,
         vtype=vtype,
         metric=metric,
@@ -356,6 +368,78 @@ def dashboard():
         sold=sold,
         emi_pending=emi_pending,
     )
+
+
+@app.route("/vehicles")
+@login_required
+def dashboard_vehicle_page():
+    q = request.args.get("q", "").strip()
+    vtype = request.args.get("type", "Car")
+    metric = request.args.get("metric", "ALL")
+    offset = max(to_int(request.args.get("offset"), 0), 0)
+    limit = max(to_int(request.args.get("limit"), VEHICLE_PAGE_SIZE), 1)
+
+    if vtype not in {"Car", "Bike"}:
+        vtype = "Car"
+    if metric not in {"ALL", "Stock", "Sold", "EMI_PENDING"}:
+        metric = "ALL"
+
+    rows = load_full_rows()
+    emi_rows = load_emi_rows()
+    overdue_buyer_ids = {
+        str(emi.get("buyer_id"))
+        for emi in emi_rows
+        if derive_emi_status(emi) == "Overdue"
+    }
+    type_rows = [row for row in rows if row.get("type") == vtype]
+    filtered_vehicles = filtered_vehicle_rows(type_rows, q, metric, overdue_buyer_ids)
+
+    page_vehicles = filtered_vehicles[offset:offset + limit]
+    html_rows = []
+    for index, vehicle in enumerate(page_vehicles, start=offset + 1):
+        number_url = url_for("view_vehicle", vid=vehicle["id"])
+        if session.get("role") == "admin":
+            edit_url = url_for("edit_vehicle", vid=vehicle["id"])
+            sell_url = url_for("sell_vehicle", vid=vehicle["id"])
+            delete_url = url_for("delete_vehicle", vid=vehicle["id"])
+            actions = f'<a href="{edit_url}">Edit</a>'
+            if vehicle.get("status") == "Stock":
+                actions += f' | <a href="{sell_url}">Sell</a>'
+            actions += f" | <a href=\"#\" onclick=\"if(confirm('Delete vehicle and all related data?')) location.href='{delete_url}'\">Delete</a>"
+        else:
+            actions = "-"
+
+        status_badge = '<span class="badge stock">In Stock</span>' if vehicle.get("status") == "Stock" else '<span class="badge sold">Sold</span>'
+        html_rows.append(
+            """
+            <tr>
+              <td>{idx}</td>
+              <td>{typ}</td>
+              <td>{name}</td>
+              <td>{brand}</td>
+              <td>{model}</td>
+              <td><a href="{number_url}" class="link">{number}</a></td>
+              <td>{status_badge}</td>
+              <td>{actions}</td>
+            </tr>
+            """.format(
+                idx=index,
+                typ=escape(vehicle.get("type", "")),
+                name=escape(vehicle.get("name", "")),
+                brand=escape(vehicle.get("brand", "")),
+                model=escape(vehicle.get("model", "")),
+                number_url=number_url,
+                number=escape(vehicle.get("number", "")),
+                status_badge=status_badge,
+                actions=actions,
+            )
+        )
+
+    return {
+        "rows_html": "".join(html_rows),
+        "next_offset": offset + len(page_vehicles),
+        "has_more": offset + len(page_vehicles) < len(filtered_vehicles),
+    }
 
 # Add vehicle (admin only) — Bike default
 @app.route("/add", methods=["GET","POST"])
@@ -929,7 +1013,7 @@ DASHBOARD_HTML = """
   <div class="card">
     <table class="table">
       <thead><tr><th>#</th><th>Type</th><th>Name</th><th>Brand</th><th>Model</th><th>Number</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody>
+      <tbody id="vehiclesBody">
       {% for v in vehicles %}
         <tr>
           <td>{{ loop.index }}</td>
@@ -952,7 +1036,66 @@ DASHBOARD_HTML = """
       {% endfor %}
       </tbody>
     </table>
+    <div id="vehiclesLoader" style="padding:12px;text-align:center;color:var(--muted);{% if not has_more %}display:none;{% endif %}">Loading more vehicles...</div>
+    <div id="vehiclesEnd" style="padding:12px;text-align:center;color:var(--muted);{% if has_more %}display:none;{% endif %}">All vehicles loaded.</div>
+    <div id="vehiclesSentinel" style="height:1px"></div>
   </div>
+
+
+<script>
+(function () {
+  const body = document.getElementById('vehiclesBody');
+  const sentinel = document.getElementById('vehiclesSentinel');
+  const loader = document.getElementById('vehiclesLoader');
+  const end = document.getElementById('vehiclesEnd');
+  if (!body || !sentinel) return;
+
+  let offset = {{ initial_count }};
+  const limit = {{ vehicle_page_size }};
+  let hasMore = {{ 'true' if has_more else 'false' }};
+  let loading = false;
+
+  function syncState() {
+    loader.style.display = hasMore ? 'block' : 'none';
+    end.style.display = hasMore ? 'none' : 'block';
+  }
+
+  async function loadMore() {
+    if (loading || !hasMore) return;
+    loading = true;
+    try {
+      const params = new URLSearchParams({
+        q: '{{ q|e }}',
+        type: '{{ vtype|e }}',
+        metric: '{{ metric|e }}',
+        offset: String(offset),
+        limit: String(limit)
+      });
+      const response = await fetch(`/vehicles?${params.toString()}`);
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data.rows_html) {
+        body.insertAdjacentHTML('beforeend', data.rows_html);
+      }
+      offset = data.next_offset;
+      hasMore = data.has_more;
+      syncState();
+    } finally {
+      loading = false;
+    }
+  }
+
+  syncState();
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        loadMore();
+      }
+    });
+  }, { rootMargin: '250px' });
+  observer.observe(sentinel);
+})();
+</script>
 
   {% if current_role == 'admin' %}
   <div class="card">
