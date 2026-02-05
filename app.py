@@ -15,10 +15,10 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from markupsafe import escape
 
 # # ----------------- CONFIG -----------------
-FULL_CSV = os.environ.get("FULL_CSV_PATH", "full.csv")
-EMI_CSV = os.environ.get("EMI_CSV_PATH", "emi.csv")
-USERS_CSV = os.environ.get("USERS_CSV_PATH", "users.csv")
-AUDIT_CSV = os.environ.get("AUDIT_CSV_PATH", "audit_log.csv")
+FULL_CSV = os.environ.get("FULL_CSV_PATH", "data/full.csv")
+EMI_CSV = os.environ.get("EMI_CSV_PATH", "data/emi.csv")
+USERS_CSV = os.environ.get("USERS_CSV_PATH", "data/users.csv")
+AUDIT_CSV = os.environ.get("AUDIT_CSV_PATH", "data/audit_log.csv")
 SECRET_KEY = os.environ.get("SECRET_KEY", "change_this_for_prod")
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", "backups"))
 BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "10"))
